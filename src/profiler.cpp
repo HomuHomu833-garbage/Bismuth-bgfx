@@ -140,6 +140,10 @@ void removeTimer(GPUTimer* timer) {
 // _PROFILER_HOOK_VOID(cocos2d::CCNodeRGBA, setColor, const cocos2d::ccColor3B&);
 // _PROFILER_HOOK_VOID(cocos2d::CCNodeRGBA, updateDisplayedColor, const cocos2d::ccColor3B&);
 
+// Timing hooks for the P snapshot, Windows only: on ARM64 some of these are
+// tiny (CCEGLView::swapBuffers() is an empty function on Android) and a hook
+// patch would overwrite the function placed after them.
+#ifdef GEODE_IS_WINDOWS
 #include <Geode/modify/CCDisplayLinkDirector.hpp>
 _PROFILER_HOOK_VOID(cocos2d::CCDisplayLinkDirector, mainLoop);
 
@@ -173,3 +177,4 @@ _PROFILER_HOOK_VOID(GJBaseGameLayer, processPlayerFollowActions, float);
 _PROFILER_HOOK_VOID(GJBaseGameLayer, processAdvancedFollowActions, float);
 _PROFILER_HOOK_VOID(GJBaseGameLayer, processFollowActions);
 _PROFILER_HOOK_VOID(GJBaseGameLayer, processMoveActionsStep, float, bool);
+#endif
