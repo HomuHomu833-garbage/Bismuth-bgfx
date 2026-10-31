@@ -1,0 +1,875 @@
+diff --git a/include/bgfx/platform.h b/include/bgfx/platform.h
+index f7843b0..34388a5 100644
+--- a/include/bgfx/platform.h
++++ b/include/bgfx/platform.h
+@@ -131,6 +131,62 @@ namespace bgfx
+ 		, uint64_t _flags = BGFX_TEXTURE_NONE|BGFX_SAMPLER_NONE
+ 		);
+ 
++	// ------------------------------------------------------------------------
++	// Bismuth patch: embedding bgfx inside an application that already renders
++	// with its own OpenGL context (Geometry Dash / cocos2d-x).
++	// All functions must be called from the render thread (single-threaded mode).
++	// ------------------------------------------------------------------------
++
++	/// OpenGL/OpenGL ES: switch to host mode. bgfx renders views targeting the
++	/// back buffer into framebuffer object `_fbo` and never presents/swaps.
++	/// Call before `init` and whenever the host's framebuffer binding changes.
++	void glSetHostFramebuffer(uint32_t _fbo);
++
++	/// Vulkan: native objects owned by bgfx (VkInstance, VkPhysicalDevice, ...).
++	struct VkHostInterop
++	{
++		void*    instance;
++		void*    physicalDevice;
++		void*    device;
++		void*    queue;
++		uint32_t queueFamilyIndex;
++		void*    getInstanceProcAddr; ///< PFN_vkGetInstanceProcAddr
++		void*    getDeviceProcAddr;   ///< PFN_vkGetDeviceProcAddr
++	};
++
++	/// Vulkan: hooks used when bgfx creates the image of a marked texture.
++	struct VkExternalTextureHooks
++	{
++		void*       userData;
++		const void* imageCreatePNext; ///< Chained into VkImageCreateInfo::pNext.
++
++		/// Allocates and binds memory for `_image` (VkImage). Writes VkDeviceMemory
++		/// to `_outMemory`; bgfx frees it with the texture. Returns VkResult.
++		int32_t (*allocateAndBind)(void* _userData, void* _device, uint64_t _image, void* _outMemory);
++	};
++
++	/// Vulkan: prefer the physical device with this VkPhysicalDeviceIDProperties::deviceUUID
++	/// (16 bytes, NULL to clear). `init` fails if no device matches. Call before `init`.
++	void vkSetPreferredDeviceUuid(const uint8_t* _uuid);
++
++	/// Vulkan: mark texture `_handle` as shared. Must be called after `createTexture*`
++	/// and before the frame that creates it. NULL hooks unmark. Shared textures are
++	/// transitioned to VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL at the end of each frame.
++	void vkSetExternalTexture(TextureHandle _handle, const VkExternalTextureHooks* _hooks);
++
++	/// Vulkan: semaphores (VkSemaphore) to wait on / signal with the next frame's
++	/// final queue submission. Returns false if too many.
++	bool vkSetFrameSemaphores(const uint64_t* _wait, uint32_t _numWait, const uint64_t* _signal, uint32_t _numSignal);
++
++	/// Vulkan: returns false if the Vulkan renderer isn't active.
++	bool vkGetHostInterop(VkHostInterop* _out);
++
++	/// Metal: block until the last frame's command buffer is scheduled (or completed).
++	void mtlWaitForLastFrame(bool _completed);
++
++	/// Reset all host-integration state. Call after `shutdown`.
++	void clearHostIntegration();
++
+ } // namespace bgfx
+ 
+ #endif // BGFX_PLATFORM_H_HEADER_GUARD
+diff --git a/src/bgfx.cpp b/src/bgfx.cpp
+index 323b262..3976637 100644
+--- a/src/bgfx.cpp
++++ b/src/bgfx.cpp
+@@ -374,6 +374,79 @@ namespace bgfx
+ 		return &g_internalData;
+ 	}
+ 
++	// Bismuth patch: host integration, see bgfx/platform.h.
++	namespace gl
++	{
++		void setHostFramebuffer(uint32_t _fbo);
++		void clearHostIntegration();
++	}
++
++	namespace vk
++	{
++		void hostSetPreferredDeviceUuid(const uint8_t* _uuid);
++		void hostSetExternalTexture(TextureHandle _handle, const VkExternalTextureHooks* _hooks);
++		bool hostSetFrameSemaphores(const uint64_t* _wait, uint32_t _numWait, const uint64_t* _signal, uint32_t _numSignal);
++		bool hostGetInterop(VkHostInterop* _out);
++		void hostClearInterop();
++	}
++
++#if BGFX_CONFIG_RENDERER_METAL
++	namespace mtl
++	{
++		void hostWaitForLastFrame(bool _completed);
++		void hostClearInterop();
++	}
++#endif // BGFX_CONFIG_RENDERER_METAL
++
++	void glSetHostFramebuffer(uint32_t _fbo)
++	{
++		gl::setHostFramebuffer(_fbo);
++	}
++
++	void vkSetPreferredDeviceUuid(const uint8_t* _uuid)
++	{
++		vk::hostSetPreferredDeviceUuid(_uuid);
++	}
++
++	void vkSetExternalTexture(TextureHandle _handle, const VkExternalTextureHooks* _hooks)
++	{
++		vk::hostSetExternalTexture(_handle, _hooks);
++	}
++
++	bool vkSetFrameSemaphores(const uint64_t* _wait, uint32_t _numWait, const uint64_t* _signal, uint32_t _numSignal)
++	{
++		return vk::hostSetFrameSemaphores(_wait, _numWait, _signal, _numSignal);
++	}
++
++	bool vkGetHostInterop(VkHostInterop* _out)
++	{
++		if (NULL == s_ctx
++		||  RendererType::Vulkan != s_ctx->m_renderCtx->getRendererType() )
++		{
++			return false;
++		}
++
++		return vk::hostGetInterop(_out);
++	}
++
++	void mtlWaitForLastFrame(bool _completed)
++	{
++#if BGFX_CONFIG_RENDERER_METAL
++		mtl::hostWaitForLastFrame(_completed);
++#else
++		BX_UNUSED(_completed);
++#endif // BGFX_CONFIG_RENDERER_METAL
++	}
++
++	void clearHostIntegration()
++	{
++		gl::clearHostIntegration();
++		vk::hostClearInterop();
++#if BGFX_CONFIG_RENDERER_METAL
++		mtl::hostClearInterop();
++#endif // BGFX_CONFIG_RENDERER_METAL
++	}
++
+ 	uintptr_t overrideInternal(TextureHandle _handle, uintptr_t _ptr)
+ 	{
+ 		BGFX_CHECK_RENDER_THREAD();
+@@ -2759,6 +2832,15 @@ namespace bgfx
+ 		for (uint32_t ii = 0; ii < numScores; ++ii)
+ 		{
+ 			RendererType::Enum renderer = RendererType::Enum(scores[ii] & 0xff);
++
++			// Bismuth patch: an explicitly requested renderer must not silently fall
++			// back to another one (the host application picks its own fallback).
++			if (RendererType::Count != _init.type
++			&&  renderer != _init.type)
++			{
++				continue;
++			}
++
+ 			renderCtx = s_rendererCreator[renderer].createFn(_init);
+ 			if (NULL != renderCtx)
+ 			{
+diff --git a/src/glcontext_eagl.mm b/src/glcontext_eagl.mm
+index 070f7f5..067a5af 100644
+--- a/src/glcontext_eagl.mm
++++ b/src/glcontext_eagl.mm
+@@ -165,6 +165,23 @@ namespace bgfx { namespace gl
+ 		BX_ASSERT(NULL != s_opengles, "OpenGLES dynamic library is not found!");
+ 
+ 		BX_UNUSED(_width, _height);
++
++		if (NULL != g_platformData.context
++		&&  NULL == g_platformData.nwh)
++		{
++			// Bismuth patch: the host application owns the EAGL context and its
++			// framebuffer. Don't touch the host's CAEAGLLayer (renderbufferStorage
++			// would steal its drawable) and never present from bgfx.
++			EAGLContext* hostContext = (__bridge EAGLContext*)g_platformData.context;
++			m_context = (__bridge void*)hostContext;
++			[EAGLContext setCurrentContext:hostContext];
++
++			import();
++
++			g_internalData.context = m_context;
++			return;
++		}
++
+ 		CAEAGLLayer* layer = (__bridge CAEAGLLayer*)g_platformData.nwh;
+ 		layer.opaque = [layer.style valueForKey:@"opaque"] == nil ? true : [[layer.style valueForKey:@"opaque"] boolValue];
+ 
+@@ -259,6 +276,12 @@ namespace bgfx { namespace gl
+ 		BX_UNUSED(_width, _height, _flags);
+ 		BX_TRACE("resize context");
+ 
++		if (NULL == g_platformData.nwh)
++		{
++			// Bismuth patch: host-owned context, the host manages its own drawable.
++			return;
++		}
++
+ 		if (0 != m_fbo)
+ 		{
+ 			GL_CHECK(glDeleteFramebuffers(1, &m_fbo) );
+@@ -325,9 +348,12 @@ namespace bgfx { namespace gl
+ 
+ 		if (NULL == _swapChain)
+ 		{
+-			GL_CHECK(glBindRenderbuffer(GL_RENDERBUFFER, m_colorRbo) );
+-			EAGLContext* context = (__bridge EAGLContext*)m_context;
+-			[context presentRenderbuffer:GL_RENDERBUFFER];
++			if (0 != m_colorRbo)
++			{
++				GL_CHECK(glBindRenderbuffer(GL_RENDERBUFFER, m_colorRbo) );
++				EAGLContext* context = (__bridge EAGLContext*)m_context;
++				[context presentRenderbuffer:GL_RENDERBUFFER];
++			}
+ 		}
+ 		else
+ 		{
+@@ -344,7 +370,11 @@ namespace bgfx { namespace gl
+ 			if (NULL == _swapChain)
+ 			{
+ 				[EAGLContext setCurrentContext:(__bridge EAGLContext*)m_context];
+-				GL_CHECK(glBindFramebuffer(GL_FRAMEBUFFER, m_fbo) );
++
++				if (0 != m_fbo)
++				{
++					GL_CHECK(glBindFramebuffer(GL_FRAMEBUFFER, m_fbo) );
++				}
+ 			}
+ 			else
+ 			{
+diff --git a/src/glcontext_egl.cpp b/src/glcontext_egl.cpp
+index 82d1991..4c1c56d 100644
+--- a/src/glcontext_egl.cpp
++++ b/src/glcontext_egl.cpp
+@@ -340,6 +340,12 @@ EGL_IMPORT
+ 
+ 			eglSwapInterval(m_display, 0);
+ 		}
++		else
++		{
++			// Bismuth patch: remember the caller-provided context so isValid() holds.
++			// m_display stays NULL, so bgfx never makes current, swaps or destroys it.
++			m_context = (EGLContext)g_platformData.context;
++		}
+ 
+ 		import();
+ 
+diff --git a/src/glcontext_glx.cpp b/src/glcontext_glx.cpp
+index d76872b..bc36dcd 100644
+--- a/src/glcontext_glx.cpp
++++ b/src/glcontext_glx.cpp
+@@ -226,66 +226,72 @@ namespace bgfx { namespace gl
+ 
+ 		import();
+ 
+-		glXMakeCurrent(m_display, (::Window)g_platformData.nwh, m_context);
+-		m_current = NULL;
+-
+-		const char* extensions = glXQueryExtensionsString(m_display, DefaultScreen(m_display) );
+-
+-		if (NULL != extensions)
++		// Bismuth patch: leave a caller-provided context alone (no make current,
++		// swap interval change, clear or swap).
++		if (NULL == g_platformData.context)
+ 		{
+-			bool foundSwapControl = false;
++			glXMakeCurrent(m_display, (::Window)g_platformData.nwh, m_context);
++			m_current = NULL;
++
++			const char* extensions = glXQueryExtensionsString(m_display, DefaultScreen(m_display) );
+ 
+-			if (haveGlxExtension("GLX_EXT_swap_control", extensions) )
++			if (NULL != extensions)
+ 			{
+-				glXSwapIntervalEXT = glXGetProcAddress<PFNGLXSWAPINTERVALEXTPROC>("glXSwapIntervalEXT");
++				bool foundSwapControl = false;
+ 
+-				if (NULL != glXSwapIntervalEXT)
++				if (haveGlxExtension("GLX_EXT_swap_control", extensions) )
+ 				{
+-					BX_TRACE("Using glXSwapIntervalEXT.");
+-					glXSwapIntervalEXT(m_display, (::Window)g_platformData.nwh, 0);
+-					foundSwapControl = true;
+-				}
+-			}
++					glXSwapIntervalEXT = glXGetProcAddress<PFNGLXSWAPINTERVALEXTPROC>("glXSwapIntervalEXT");
+ 
+-			if (!foundSwapControl
+-			&&  haveGlxExtension("GLX_MESA_swap_control", extensions) )
+-			{
+-				glXSwapIntervalMESA = glXGetProcAddress<PFNGLXSWAPINTERVALMESAPROC>("glXSwapIntervalMESA");
++					if (NULL != glXSwapIntervalEXT)
++					{
++						BX_TRACE("Using glXSwapIntervalEXT.");
++						glXSwapIntervalEXT(m_display, (::Window)g_platformData.nwh, 0);
++						foundSwapControl = true;
++					}
++				}
+ 
+-				if (NULL != glXSwapIntervalMESA)
++				if (!foundSwapControl
++				&&  haveGlxExtension("GLX_MESA_swap_control", extensions) )
+ 				{
+-					BX_TRACE("Using glXSwapIntervalMESA.");
+-					glXSwapIntervalMESA(0);
+-					foundSwapControl = true;
+-				}
+-			}
++					glXSwapIntervalMESA = glXGetProcAddress<PFNGLXSWAPINTERVALMESAPROC>("glXSwapIntervalMESA");
+ 
+-			if (!foundSwapControl
+-			&&  haveGlxExtension("GLX_SGI_swap_control", extensions) )
+-			{
+-				glXSwapIntervalSGI = glXGetProcAddress<PFNGLXSWAPINTERVALSGIPROC>("glXSwapIntervalSGI");
++					if (NULL != glXSwapIntervalMESA)
++					{
++						BX_TRACE("Using glXSwapIntervalMESA.");
++						glXSwapIntervalMESA(0);
++						foundSwapControl = true;
++					}
++				}
+ 
+-				if (NULL != glXSwapIntervalSGI)
++				if (!foundSwapControl
++				&&  haveGlxExtension("GLX_SGI_swap_control", extensions) )
+ 				{
+-					BX_TRACE("Using glXSwapIntervalSGI.");
+-					glXSwapIntervalSGI(0);
+-					foundSwapControl = true;
++					glXSwapIntervalSGI = glXGetProcAddress<PFNGLXSWAPINTERVALSGIPROC>("glXSwapIntervalSGI");
++
++					if (NULL != glXSwapIntervalSGI)
++					{
++						BX_TRACE("Using glXSwapIntervalSGI.");
++						glXSwapIntervalSGI(0);
++						foundSwapControl = true;
++					}
+ 				}
+ 			}
+-		}
+ 
+-		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+-		glClear(GL_COLOR_BUFFER_BIT);
+-		glXSwapBuffers(m_display, (::Window)g_platformData.nwh);
++			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
++			glClear(GL_COLOR_BUFFER_BIT);
++			glXSwapBuffers(m_display, (::Window)g_platformData.nwh);
++		}
+ 
+ 		g_internalData.context = m_context;
+ 	}
+ 
+ 	void GlContext::destroy()
+ 	{
+-		glXMakeCurrent(m_display, 0, 0);
+ 		if (NULL == g_platformData.context)
+ 		{
++			// Bismuth patch: only unbind contexts bgfx created itself.
++			glXMakeCurrent(m_display, 0, 0);
+ 			glXDestroyContext(m_display, m_context);
+ 			XFree(m_visualInfo);
+ 		}
+diff --git a/src/glcontext_nsgl.mm b/src/glcontext_nsgl.mm
+index 0bed6f5..20d89fd 100644
+--- a/src/glcontext_nsgl.mm
++++ b/src/glcontext_nsgl.mm
+@@ -285,6 +285,12 @@ namespace bgfx { namespace gl
+ 	{
+ 		BX_UNUSED(_width, _height);
+ 
++		if (NULL != g_platformData.context)
++		{
++			// Bismuth patch: the host owns the context, don't override its swap interval.
++			return;
++		}
++
+ #if defined(MAC_OS_X_VERSION_MAX_ALLOWED) && (MAC_OS_X_VERSION_MAX_ALLOWED >= 1070)
+ 		bool hidpi = !!(_flags&BGFX_RESET_HIDPI);
+         if (m_view)
+diff --git a/src/glcontext_wgl.cpp b/src/glcontext_wgl.cpp
+index ce8f353..2faa23c 100644
+--- a/src/glcontext_wgl.cpp
++++ b/src/glcontext_wgl.cpp
+@@ -304,10 +304,11 @@ namespace bgfx { namespace gl
+ 	{
+ 		if (NULL != g_platformData.nwh)
+ 		{
+-			wglMakeCurrent(NULL, NULL);
+-
+ 			if (NULL == g_platformData.context)
+ 			{
++				// Bismuth patch: only unbind contexts bgfx created itself; a host
++				// application's context must stay current after shutdown.
++				wglMakeCurrent(NULL, NULL);
+ 				wglDeleteContext(m_context);
+ 				m_context = NULL;
+ 
+@@ -323,6 +324,12 @@ namespace bgfx { namespace gl
+ 
+ 	void GlContext::resize(uint32_t /*_width*/, uint32_t /*_height*/, uint32_t _flags)
+ 	{
++		if (NULL != g_platformData.context)
++		{
++			// Bismuth patch: the host owns the context, don't override its swap interval.
++			return;
++		}
++
+ 		if (NULL != wglSwapIntervalEXT)
+ 		{
+ 			bool vsync = !!(_flags&BGFX_RESET_VSYNC);
+diff --git a/src/renderer_gl.cpp b/src/renderer_gl.cpp
+index 020dceb..39562c7 100644
+--- a/src/renderer_gl.cpp
++++ b/src/renderer_gl.cpp
+@@ -13,6 +13,16 @@
+ 
+ namespace bgfx { namespace gl
+ {
++	// Bismuth patch: integration with a GL context owned by the host application
++	// (Geometry Dash / cocos2d-x). In host mode bgfx renders the "back buffer" into
++	// whatever framebuffer object the host had bound and never presents/swaps.
++	struct HostIntegration
++	{
++		bool   enabled = false;
++		GLuint fbo     = 0;
++	};
++	static HostIntegration s_host;
++
+ 	static char s_viewName[BGFX_CONFIG_MAX_VIEWS][BGFX_CONFIG_MAX_VIEW_NAME];
+ 
+ 	inline void setViewType(ViewId _view, const bx::StringView _str)
+@@ -3269,10 +3279,14 @@ namespace bgfx { namespace gl
+ 
+ 				if (m_needPresent)
+ 				{
+-					// Ensure the back buffer is bound as the source of the flip
+-					GL_CHECK(glBindFramebuffer(GL_FRAMEBUFFER, m_backBufferFbo) );
++					if (!s_host.enabled)
++					{
++						// Ensure the back buffer is bound as the source of the flip
++						GL_CHECK(glBindFramebuffer(GL_FRAMEBUFFER, m_backBufferFbo) );
++
++						m_glctx.swap();
++					}
+ 
+-					m_glctx.swap();
+ 					m_needPresent = false;
+ 				}
+ 			}
+@@ -4147,7 +4161,7 @@ namespace bgfx { namespace gl
+ 
+ #if BX_PLATFORM_IOS
+ 					// iOS: need to figure out how to deal with FBO created by context.
+-					m_backBufferFbo = m_msaaBackBufferFbo = m_glctx.getFbo();
++					m_backBufferFbo = m_msaaBackBufferFbo = s_host.enabled ? s_host.fbo : m_glctx.getFbo();
+ #endif // BX_PLATFORM_IOS
+ 				}
+ 				else
+@@ -4825,6 +4839,23 @@ namespace bgfx { namespace gl
+ 
+ 	RendererContextGL* s_renderGL;
+ 
++	void setHostFramebuffer(uint32_t _fbo)
++	{
++		s_host.enabled = true;
++		s_host.fbo     = GLuint(_fbo);
++
++		if (NULL != s_renderGL)
++		{
++			s_renderGL->m_backBufferFbo    = s_host.fbo;
++			s_renderGL->m_msaaBackBufferFbo = s_host.fbo;
++		}
++	}
++
++	void clearHostIntegration()
++	{
++		s_host = HostIntegration();
++	}
++
+ 	RendererContextI* rendererCreate(const Init& _init)
+ 	{
+ 		s_renderGL = BX_NEW(g_allocator, RendererContextGL);
+@@ -7717,7 +7748,9 @@ namespace bgfx { namespace gl
+ 									{
+ 										const VertexBufferGL& buffer = m_vertexBuffers[bind.m_idx];
+ 										GL_CHECK(glBindBufferBase(GL_SHADER_STORAGE_BUFFER, ii, buffer.m_id) );
+-										barrier |= GL_SHADER_STORAGE_BARRIER_BIT;
++										// Bismuth patch: indirect buffers are vertex buffers; draws reading
++										// commands written by compute need GL_COMMAND_BARRIER_BIT too.
++										barrier |= GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT;
+ 									}
+ 									break;
+ 								}
+@@ -8847,6 +8880,15 @@ namespace bgfx { namespace gl
+ 	void rendererDestroy()
+ 	{
+ 	}
++
++	void setHostFramebuffer(uint32_t _fbo)
++	{
++		BX_UNUSED(_fbo);
++	}
++
++	void clearHostIntegration()
++	{
++	}
+ } /* namespace gl */ } // namespace bgfx
+ 
+ #endif // (BGFX_CONFIG_RENDERER_OPENGLES || BGFX_CONFIG_RENDERER_OPENGL)
+diff --git a/src/renderer_mtl.mm b/src/renderer_mtl.mm
+index 1eff4ca..33bf190 100644
+--- a/src/renderer_mtl.mm
++++ b/src/renderer_mtl.mm
+@@ -20,6 +20,10 @@
+ 
+ namespace bgfx { namespace mtl
+ {
++	// Bismuth patch: last committed end-of-frame command buffer, so a host
++	// application can order its own (OpenGL) work after bgfx's frame.
++	static id<MTLCommandBuffer> s_hostLastFrameCommandBuffer = nil;
++
+ 	static char s_viewName[BGFX_CONFIG_MAX_VIEWS][BGFX_CONFIG_MAX_VIEW_NAME];
+ 
+ 	inline void setViewType(ViewId _view, const bx::StringView _str)
+@@ -481,7 +485,8 @@ BX_STATIC_ASSERT(BX_COUNTOF(s_accessNames) == Access::Count, "Invalid s_accessNa
+ 				);
+ 			m_numWindows = 1;
+ 
+-			if (NULL == m_mainFrameBuffer.m_swapChain->m_metalLayer)
++			if (NULL == m_mainFrameBuffer.m_swapChain->m_metalLayer
++			&&  NULL != g_platformData.nwh) // Bismuth patch: allow headless (offscreen-only) use.
+ 			{
+ 				release(m_device);
+ 				return false;
+@@ -3635,6 +3640,17 @@ BX_STATIC_ASSERT(BX_COUNTOF(s_accessNames) == Access::Count, "Invalid s_accessNa
+ 				m_activeCommandBuffer.waitUntilCompleted();
+ 			}
+ 
++			if (_endFrame)
++			{
++				if (nil != s_hostLastFrameCommandBuffer)
++				{
++					[s_hostLastFrameCommandBuffer release];
++				}
++
++				s_hostLastFrameCommandBuffer = m_activeCommandBuffer.m_obj;
++				[s_hostLastFrameCommandBuffer retain];
++			}
++
+ 			MTL_RELEASE(m_activeCommandBuffer);
+ 		}
+ 	}
+@@ -5123,12 +5139,39 @@ BX_STATIC_ASSERT(BX_COUNTOF(s_accessNames) == Access::Count, "Invalid s_accessNa
+ 		}
+ 	}
+ 
++	void hostWaitForLastFrame(bool _completed)
++	{
++		if (nil != s_hostLastFrameCommandBuffer)
++		{
++			if (_completed)
++			{
++				[s_hostLastFrameCommandBuffer waitUntilCompleted];
++			}
++			else
++			{
++				[s_hostLastFrameCommandBuffer waitUntilScheduled];
++			}
++		}
++	}
++
++	void hostClearInterop()
++	{
++		if (nil != s_hostLastFrameCommandBuffer)
++		{
++			[s_hostLastFrameCommandBuffer release];
++			s_hostLastFrameCommandBuffer = nil;
++		}
++	}
++
+ } /* namespace mtl */ } // namespace bgfx
+ 
+ #else
+ 
+ namespace bgfx { namespace mtl
+ 	{
++		void hostWaitForLastFrame(bool) {}
++		void hostClearInterop() {}
++
+ 		RendererContextI* rendererCreate(const Init& _init)
+ 		{
+ 			BX_UNUSED(_init);
+diff --git a/src/renderer_vk.cpp b/src/renderer_vk.cpp
+index 6d52e20..3076307 100644
+--- a/src/renderer_vk.cpp
++++ b/src/renderer_vk.cpp
+@@ -342,6 +342,20 @@ VK_IMPORT_DEVICE
+ 			EXT_shader_viewport_index_layer,
+ 			EXT_custom_border_color,
+ 			KHR_draw_indirect_count,
++			// Bismuth patch: cross-API sharing with the host's OpenGL context.
++			KHR_external_memory,
++			KHR_external_memory_win32,
++			KHR_external_memory_fd,
++			ANDROID_external_memory_android_hardware_buffer,
++			KHR_external_semaphore,
++			KHR_external_semaphore_win32,
++			KHR_external_semaphore_fd,
++			KHR_dedicated_allocation,
++			KHR_get_memory_requirements2,
++			KHR_sampler_ycbcr_conversion,
++			KHR_maintenance1,
++			KHR_bind_memory2,
++			EXT_queue_family_foreign,
+ 
+ 			Count
+ 		};
+@@ -367,9 +381,38 @@ VK_IMPORT_DEVICE
+ 		{ "VK_EXT_shader_viewport_index_layer",     1, false, false, true                                                         , Layer::Count },
+ 		{ "VK_EXT_custom_border_color",             1, false, false, true                                                         , Layer::Count },
+ 		{ "VK_KHR_draw_indirect_count",             1, false, false, true                                                         , Layer::Count },
++		{ "VK_KHR_external_memory",                 1, false, false, true                                                         , Layer::Count },
++		{ "VK_KHR_external_memory_win32",           1, false, false, true                                                         , Layer::Count },
++		{ "VK_KHR_external_memory_fd",              1, false, false, true                                                         , Layer::Count },
++		{ "VK_ANDROID_external_memory_android_hardware_buffer", 1, false, false, true                                             , Layer::Count },
++		{ "VK_KHR_external_semaphore",              1, false, false, true                                                         , Layer::Count },
++		{ "VK_KHR_external_semaphore_win32",        1, false, false, true                                                         , Layer::Count },
++		{ "VK_KHR_external_semaphore_fd",           1, false, false, true                                                         , Layer::Count },
++		{ "VK_KHR_dedicated_allocation",            1, false, false, true                                                         , Layer::Count },
++		{ "VK_KHR_get_memory_requirements2",        1, false, false, true                                                         , Layer::Count },
++		{ "VK_KHR_sampler_ycbcr_conversion",        1, false, false, true                                                         , Layer::Count },
++		{ "VK_KHR_maintenance1",                    1, false, false, true                                                         , Layer::Count },
++		{ "VK_KHR_bind_memory2",                    1, false, false, true                                                         , Layer::Count },
++		{ "VK_EXT_queue_family_foreign",            1, false, false, true                                                         , Layer::Count },
+ 	};
+ 	BX_STATIC_ASSERT(Extension::Count == BX_COUNTOF(s_extension) );
+ 
++	// Bismuth patch: host interop state, see bgfx/platform.h (vkHost* functions).
++	struct HostInterop
++	{
++		bool     hasDeviceUuid = false;
++		uint8_t  deviceUuid[VK_UUID_SIZE] = {};
++
++		VkExternalTextureHooks textureHooks[BGFX_CONFIG_MAX_TEXTURES] = {};
++
++		// Applied to the last queue submission of the next frame, then cleared.
++		uint32_t    numWait = 0;
++		::VkSemaphore wait[4] = {};
++		uint32_t    numSignal = 0;
++		::VkSemaphore signal[4] = {};
++	};
++	static HostInterop s_hostInterop;
++
+ 	bool updateExtension(const char* _name, uint32_t _version, bool _instanceExt, Extension _extensions[Extension::Count])
+ 	{
+ 		bool supported = false;
+@@ -1494,6 +1537,45 @@ VK_IMPORT_INSTANCE
+ 						;
+ 				}
+ 
++				// Bismuth patch: the device must be the same GPU as the host's GL context
++				// for memory sharing to work (dual-GPU laptops).
++				if (s_hostInterop.hasDeviceUuid)
++				{
++					PFN_vkGetPhysicalDeviceProperties2 getProps2 = (PFN_vkGetPhysicalDeviceProperties2)vkGetInstanceProcAddr(m_instance, "vkGetPhysicalDeviceProperties2");
++					if (NULL == getProps2)
++					{
++						getProps2 = (PFN_vkGetPhysicalDeviceProperties2)vkGetInstanceProcAddr(m_instance, "vkGetPhysicalDeviceProperties2KHR");
++					}
++
++					bool found = false;
++					for (uint32_t ii = 0; NULL != getProps2 && ii < numPhysicalDevices; ++ii)
++					{
++						VkPhysicalDeviceIDProperties idProps;
++						bx::memSet(&idProps, 0, sizeof(idProps) );
++						idProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
++
++						VkPhysicalDeviceProperties2 props2;
++						bx::memSet(&props2, 0, sizeof(props2) );
++						props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
++						props2.pNext = &idProps;
++
++						getProps2(physicalDevices[ii], &props2);
++
++						if (0 == bx::memCmp(idProps.deviceUUID, s_hostInterop.deviceUuid, VK_UUID_SIZE) )
++						{
++							physicalDeviceIdx = ii;
++							found = true;
++							break;
++						}
++					}
++
++					if (!found)
++					{
++						BX_TRACE("Init error: no Vulkan device matches the host GL device UUID.");
++						goto error;
++					}
++				}
++
+ 				m_physicalDevice = physicalDevices[physicalDeviceIdx];
+ 
+ 				bx::memCopy(&s_extension[0], &physicalDeviceExtensions[physicalDeviceIdx][0], sizeof(s_extension) );
+@@ -5787,6 +5869,19 @@ VK_DESTROY
+ 			;
+ 		ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+ 
++		// Bismuth patch: textures shared with the host's GL context.
++		const uint32_t hostTextureIdx = uint32_t(this - s_renderVK->m_textures);
++		const VkExternalTextureHooks* hostHooks = hostTextureIdx < BGFX_CONFIG_MAX_TEXTURES
++			&& NULL != s_hostInterop.textureHooks[hostTextureIdx].allocateAndBind
++			? &s_hostInterop.textureHooks[hostTextureIdx]
++			: NULL
++			;
++
++		if (NULL != hostHooks)
++		{
++			ici.pNext = hostHooks->imageCreatePNext;
++		}
++
+ 		result = vkCreateImage(device, &ici, allocatorCb, &m_textureImage);
+ 		if (VK_SUCCESS != result)
+ 		{
+@@ -5794,6 +5889,29 @@ VK_DESTROY
+ 			return result;
+ 		}
+ 
++		if (NULL != hostHooks)
++		{
++			// Non-dispatchable handles are pointers or uint64_t depending on the ABI.
++			uint64_t hostImage = 0;
++			const ::VkImage rawImage = m_textureImage;
++			bx::memCopy(&hostImage, &rawImage, sizeof(rawImage) );
++
++			::VkDeviceMemory hostMemory = VK_NULL_HANDLE;
++			result = (VkResult)hostHooks->allocateAndBind(
++				  hostHooks->userData
++				, (void*)device
++				, hostImage
++				, &hostMemory
++				);
++			m_textureDeviceMem = hostMemory;
++			if (VK_SUCCESS != result)
++			{
++				BX_TRACE("Create texture image error: host allocateAndBind failed %d: %s.", result, getName(result) );
++				return result;
++			}
++		}
++		else
++		{
+ 		VkMemoryRequirements imageMemReq;
+ 		vkGetImageMemoryRequirements(device, m_textureImage, &imageMemReq);
+ 
+@@ -5810,6 +5928,7 @@ VK_DESTROY
+ 			BX_TRACE("Create texture image error: vkBindImageMemory failed %d: %s.", result, getName(result) );
+ 			return result;
+ 		}
++		}
+ 
+ 		m_sampledLayout = m_flags & BGFX_TEXTURE_COMPUTE_WRITE
+ 			? VK_IMAGE_LAYOUT_GENERAL
+@@ -9154,15 +9273,107 @@ VK_DESTROY
+ 			}
+ 		}
+ 
++		// Bismuth patch: shared textures are handed to the host in SHADER_READ_ONLY layout,
++		// and the host's semaphores are attached to this frame's submission.
++		for (uint32_t ii = 0; ii < BGFX_CONFIG_MAX_TEXTURES; ++ii)
++		{
++			if (NULL != s_hostInterop.textureHooks[ii].allocateAndBind
++			&&  VK_NULL_HANDLE != m_textures[ii].m_textureImage)
++			{
++				m_textures[ii].setImageMemoryBarrier(m_commandBuffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++			}
++		}
++
++		for (uint32_t ii = 0; ii < s_hostInterop.numWait; ++ii)
++		{
++			m_cmd.addWaitSemaphore(s_hostInterop.wait[ii], VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
++		}
++
++		for (uint32_t ii = 0; ii < s_hostInterop.numSignal; ++ii)
++		{
++			m_cmd.addSignalSemaphore(s_hostInterop.signal[ii]);
++		}
++
++		s_hostInterop.numWait   = 0;
++		s_hostInterop.numSignal = 0;
++
+ 		kick();
+ 	}
+ 
++	void hostSetPreferredDeviceUuid(const uint8_t* _uuid)
++	{
++		s_hostInterop.hasDeviceUuid = NULL != _uuid;
++		if (NULL != _uuid)
++		{
++			bx::memCopy(s_hostInterop.deviceUuid, _uuid, VK_UUID_SIZE);
++		}
++	}
++
++	void hostSetExternalTexture(TextureHandle _handle, const VkExternalTextureHooks* _hooks)
++	{
++		if (isValid(_handle) )
++		{
++			s_hostInterop.textureHooks[_handle.idx] = NULL != _hooks ? *_hooks : VkExternalTextureHooks();
++		}
++	}
++
++	bool hostSetFrameSemaphores(const uint64_t* _wait, uint32_t _numWait, const uint64_t* _signal, uint32_t _numSignal)
++	{
++		if (_numWait > BX_COUNTOF(s_hostInterop.wait)
++		||  _numSignal > BX_COUNTOF(s_hostInterop.signal) )
++		{
++			return false;
++		}
++
++		s_hostInterop.numWait = _numWait;
++		for (uint32_t ii = 0; ii < _numWait; ++ii)
++		{
++			bx::memCopy(&s_hostInterop.wait[ii], &_wait[ii], sizeof(::VkSemaphore) );
++		}
++
++		s_hostInterop.numSignal = _numSignal;
++		for (uint32_t ii = 0; ii < _numSignal; ++ii)
++		{
++			bx::memCopy(&s_hostInterop.signal[ii], &_signal[ii], sizeof(::VkSemaphore) );
++		}
++
++		return true;
++	}
++
++	bool hostGetInterop(VkHostInterop* _out)
++	{
++		if (NULL == s_renderVK)
++		{
++			return false;
++		}
++
++		_out->instance              = (void*)s_renderVK->m_instance;
++		_out->physicalDevice        = (void*)s_renderVK->m_physicalDevice;
++		_out->device                = (void*)s_renderVK->m_device;
++		_out->queue                 = (void*)s_renderVK->m_globalQueue;
++		_out->queueFamilyIndex      = s_renderVK->m_globalQueueFamily;
++		_out->getInstanceProcAddr   = (void*)vkGetInstanceProcAddr;
++		_out->getDeviceProcAddr     = (void*)vkGetDeviceProcAddr;
++		return true;
++	}
++
++	void hostClearInterop()
++	{
++		s_hostInterop = HostInterop();
++	}
++
+ } /* namespace vk */ } // namespace bgfx
+ 
+ #else
+ 
+ namespace bgfx { namespace vk
+ {
++	void hostSetPreferredDeviceUuid(const uint8_t*) {}
++	void hostSetExternalTexture(TextureHandle, const VkExternalTextureHooks*) {}
++	bool hostSetFrameSemaphores(const uint64_t*, uint32_t, const uint64_t*, uint32_t) { return false; }
++	bool hostGetInterop(VkHostInterop*) { return false; }
++	void hostClearInterop() {}
++
+ 	RendererContextI* rendererCreate(const Init& _init)
+ 	{
+ 		BX_UNUSED(_init);
