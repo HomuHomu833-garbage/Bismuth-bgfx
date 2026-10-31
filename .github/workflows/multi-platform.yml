@@ -21,10 +21,6 @@ jobs:
         - name: iOS
           os: macos-latest
           target: iOS
-          # geode-sdk/bindings main currently generates iOS sources that don't
-          # compile (FMOD standalone functions, since ffe936da); use the last
-          # revision before that until upstream is fixed.
-          bindings-ref: d12b88590ab528a5b02a38c5170d3abcc807dfb2
 
         - name: Android32
           os: ubuntu-latest
@@ -47,7 +43,6 @@ jobs:
           target: ${{ matrix.config.target }}
           # Same Geode version as mod.json.
           sdk: v5.10.1
-          bindings-ref: ${{ matrix.config.bindings-ref }}
 
   # Rendering core tests on Mesa (llvmpipe OpenGL + lavapipe Vulkan): every
   # backend / culling combination must render the same image. Also checks that
