@@ -55,13 +55,17 @@ function(bismuth_fetch_pinned_git)
             endif()
         endmacro()
 
+        # Keep upstream line endings (Windows runners default to core.autocrlf=true,
+        # which would make the LF patches fail to apply).
         _bismuth_git(init -q)
+        _bismuth_git(config core.autocrlf false)
+        _bismuth_git(config core.eol lf)
         _bismuth_git(fetch -q --depth 1 "${ARG_URL}" "${ARG_COMMIT}")
         _bismuth_git(-c advice.detachedHead=false checkout -q FETCH_HEAD)
 
         foreach(patch IN LISTS ARG_PATCHES)
             message(STATUS "Applying ${patch}")
-            _bismuth_git(apply --whitespace=nowarn "${patch}")
+            _bismuth_git(apply --whitespace=nowarn --ignore-whitespace "${patch}")
         endforeach()
 
         file(WRITE "${stampFile}" "${stamp}")

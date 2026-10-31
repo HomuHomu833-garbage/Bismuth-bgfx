@@ -1,0 +1,5 @@
+# Patches for pinned dependencies must keep their exact (LF) line endings.
+*.patch -text
+# Generated shader binaries and shell scripts.
+src/gfx/shaders/generated/** -text
+*.sh text eol=lf
