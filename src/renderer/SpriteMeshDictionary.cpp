@@ -21,9 +21,9 @@ class $modify(SpriteMeshDictionaryCCSprite, CCSprite) {
         return false;
     }
 
-    ~SpriteMeshDictionaryCCSprite() {
-        spriteFramesOfSprites.erase(this);
-    }
+    // Entries aren't removed when sprites are destroyed (a C++ destructor in a
+    // $modify class is never called), so lookups check that the sprite still
+    // displays the recorded frame: a new sprite can reuse a freed address.
 };
 
 static std::unordered_map<CCSpriteFrame*, ConvexList> spriteMeshesPerFrame;
@@ -36,6 +36,11 @@ ConvexList* SpriteMeshDictionary::getSpriteMeshForSprite(cocos2d::CCSprite* spri
     auto meshIt = spriteMeshesPerFrame.find(frameIt->second);
     if (meshIt == spriteMeshesPerFrame.end())
         return nullptr;
+
+    if (!sprite->isFrameDisplayed(frameIt->second)) {
+        spriteFramesOfSprites.erase(frameIt);
+        return nullptr;
+    }
 
     return &meshIt->second;
 }

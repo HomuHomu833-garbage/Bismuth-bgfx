@@ -62,15 +62,7 @@ class $modify(RendererPlayLayer, PlayLayer) {
         timer.end();
     }
 
-    CheckpointObject* createCheckpoint() {
-        CheckpointObject* ret = PlayLayer::createCheckpoint();
-
-        auto renderer = Renderer::get();
-        if (renderer)
-            renderer->getGroupManager().storeCheckpoint(ret);
-        
-        return ret;
-    }
+    CheckpointObject* createCheckpoint();
 
     void loadFromCheckpoint(CheckpointObject* object) {
         PlayLayer::loadFromCheckpoint(object);
@@ -92,12 +84,26 @@ class $modify(MyCheckpointObject, CheckpointObject) {
         }
     };
 
-    bool init() {
-        if (!CheckpointObject::init()) return false;
-        m_fields.self()->checkpoint = this;
-        return true;
+    // No hook on CheckpointObject::init(): it's a 4-byte `return true` placed
+    // right before GravityEffectSprite::init() on ARM64 (Android, macOS, iOS),
+    // so hooking it overwrites the start of GravityEffectSprite::init() and
+    // PlayLayer::init() crashes. The field is set from createCheckpoint().
+    void track() {
+        m_fields->checkpoint = this;
     }
 };
+
+CheckpointObject* RendererPlayLayer::createCheckpoint() {
+    CheckpointObject* ret = PlayLayer::createCheckpoint();
+
+    auto renderer = Renderer::get();
+    if (renderer && ret) {
+        static_cast<MyCheckpointObject*>(ret)->track();
+        renderer->getGroupManager().storeCheckpoint(ret);
+    }
+
+    return ret;
+}
 
 #include <Geode/modify/GameObject.hpp>
 class $modify(MyGameObject, GameObject) {

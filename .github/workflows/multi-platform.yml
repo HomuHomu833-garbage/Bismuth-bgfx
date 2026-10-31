@@ -42,7 +42,7 @@ jobs:
           combine: true
           target: ${{ matrix.config.target }}
           # Same Geode version as mod.json.
-          sdk: v5.10.1
+          sdk: v5.11.2
 
   # Rendering core tests on Mesa (llvmpipe OpenGL + lavapipe Vulkan): every
   # backend / culling combination must render the same image. Also checks that
