@@ -41,6 +41,9 @@ jobs:
         with:
           combine: true
           target: ${{ matrix.config.target }}
+          # Same Geode version as mod.json (the nightly SDK currently fails to
+          # build its iOS bindings).
+          sdk: v5.10.1
 
   # Rendering core tests on Mesa (llvmpipe OpenGL + lavapipe Vulkan): every
   # backend / culling combination must render the same image. Also checks that
