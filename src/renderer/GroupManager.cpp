@@ -376,6 +376,8 @@ void GroupManager::updatePulseEntries() {
     // having to be checked
     pulseEntries.push_back(PulseEntry::endIndicator());
 
+    usize maxEntryCount = 0;
+
     for (auto groupCombIndex : pulsingGroupCombs) {
         u32 pulseIndex = pulseEntries.size();
 
@@ -395,7 +397,8 @@ void GroupManager::updatePulseEntries() {
                     continue;
                 }
 
-                pulseEntries.push_back(PulseEntry::fromAction(action));            
+                pulseEntries.push_back(PulseEntry::fromAction(action));     
+                maxEntryCount++;       
             }
         }
 
