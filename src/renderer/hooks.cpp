@@ -5,6 +5,7 @@
 #include <BProfiler.hpp>
 #include "../cl.hpp"
 #include <gfx/Device.hpp>
+#include <platform/FpsUnlock.hpp>
 
 using namespace geode::prelude;
 
@@ -302,9 +303,12 @@ class $modify(RendererGJBaseGameLayer, GJBaseGameLayer) {
 #include <Geode/modify/CCDisplayLinkDirector.hpp>
 class $modify(RendererCCDisplayLinkDirector, CCDisplayLinkDirector) {
     void mainLoop() {
+        bismuth::fps::beforeFrame();
+
         auto ren = Renderer::get();
         if (!ren) {
             CCDisplayLinkDirector::mainLoop();
+            bismuth::fps::afterFrame();
             return;
         }
 
@@ -313,6 +317,7 @@ class $modify(RendererCCDisplayLinkDirector, CCDisplayLinkDirector) {
         timer.end();
 
         BProfiler::frameEnd();
+        bismuth::fps::afterFrame();
     }
 };
 

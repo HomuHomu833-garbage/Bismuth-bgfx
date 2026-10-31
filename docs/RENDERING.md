@@ -70,6 +70,8 @@ combination produces the same image.
 | GPU core count | GPU culling work group sizing (auto-detected on Windows only) |
 | Show debug overlay | Same as F3, for devices without a keyboard |
 | Overdraw view | Same as F4 |
+| Unlock FPS | Windows, macOS, Android: turns off vsync and GD's frame limiter |
+| FPS cap | Frame rate limit while unlocked (0 = none) |
 
 ## Building
 
