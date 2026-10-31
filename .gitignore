@@ -69,4 +69,5 @@ config.bat
 
 # Random stuff
 private/
-SpriteMeshEditor/node_modulesbuild-shaderc/
+SpriteMeshEditor/node_modules
+build-shaderc/
