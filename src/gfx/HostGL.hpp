@@ -112,8 +112,6 @@ namespace gl {
     constexpr GLenum COLOR_BUFFER_BIT          = 0x4000;
     constexpr GLenum SYNC_GPU_COMMANDS_COMPLETE = 0x9117;
     constexpr GLenum SYNC_FLUSH_COMMANDS_BIT   = 0x00000001;
-    constexpr GLenum TIMEOUT_EXPIRED           = 0x911B;
-    constexpr GLenum WAIT_FAILED               = 0x911D;
     // EXT_memory_object / EXT_semaphore
     constexpr GLenum TEXTURE_TILING_EXT        = 0x9580;
     constexpr GLenum DEDICATED_MEMORY_OBJECT_EXT = 0x9581;
