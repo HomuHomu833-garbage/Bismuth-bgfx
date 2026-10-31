@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "Renderer.hpp"
 #include "Geode/cocos/CCDirector.h"
 #include "Geode/cocos/kazmath/include/kazmath/mat4.h"
@@ -163,6 +164,15 @@ bool Renderer::init(PlayLayer* layer, CCArray* levelObjects) {
 
         sorter.addGameObject(object);
     }
+
+    // Objects with a particle system (portals, orbs, pads, coins...). GD only
+    // creates their particles when it activates the object, which Bismuth skips.
+    for (auto object : CCArrayExt<GameObject*>(levelObjects)) {
+        if (object->m_hasParticles && !object->m_hasNoParticles && !object->m_isHide
+        &&  !object->m_particleString.empty())
+            particleObjects.push_back({ object, false });
+    }
+    log::info("{} object(s) with particles", particleObjects.size());
 
     for (auto it = sorter.iterator(); !it.isEnd(); it.next())
         objects.push_back(it.get());
@@ -760,6 +770,70 @@ void Renderer::setEnabled(bool enabled) {
 
 void Renderer::reset() {
     groupManager.resetGroupStates();
+}
+
+void Renderer::updateObjectParticles(float dt) {
+    if (!particleObjects.empty()) {
+        // Camera bounds in object layer space (handles zoom and rotation), with a
+        // margin like GD's activation sections so particles start off-screen.
+        constexpr float margin = 150.f;
+
+        auto winsize = CCDirector::get()->getWinSize();
+        CCPoint corners[4] = {
+            layer->m_objectLayer->convertToNodeSpace({ 0, 0 }),
+            layer->m_objectLayer->convertToNodeSpace({ winsize.width, 0 }),
+            layer->m_objectLayer->convertToNodeSpace({ 0, winsize.height }),
+            layer->m_objectLayer->convertToNodeSpace({ winsize.width, winsize.height }),
+        };
+
+        float minX = corners[0].x, maxX = corners[0].x;
+        float minY = corners[0].y, maxY = corners[0].y;
+        for (auto& corner : corners) {
+            minX = std::min(minX, corner.x); maxX = std::max(maxX, corner.x);
+            minY = std::min(minY, corner.y); maxY = std::max(maxY, corner.y);
+        }
+        minX -= margin; maxX += margin;
+        minY -= margin; maxY += margin;
+
+        for (auto& entry : particleObjects) {
+            auto object = entry.object;
+
+            bool wanted = !object->m_isGroupDisabled;
+            if (wanted) {
+                CCPoint position = object->getRealPosition();
+                wanted = position.x >= minX && position.x <= maxX
+                      && position.y >= minY && position.y <= maxY;
+            }
+
+            if (wanted && !entry.claimed) {
+                if (!object->m_particle)
+                    object->claimParticle();
+                entry.claimed = true;
+                claimedParticleCount++;
+            } else if (!wanted && entry.claimed) {
+                if (object->m_particle)
+                    object->unclaimParticle();
+                entry.claimed = false;
+                claimedParticleCount--;
+            }
+        }
+    }
+
+    layer->updateParticles(dt);
+}
+
+void Renderer::releaseObjectParticles() {
+    if (claimedParticleCount == 0)
+        return;
+
+    for (auto& entry : particleObjects) {
+        if (entry.claimed) {
+            if (entry.object->m_particle)
+                entry.object->unclaimParticle();
+            entry.claimed = false;
+        }
+    }
+    claimedParticleCount = 0;
 }
 
 DECLARE_HOTKEY(KEY_F3, {

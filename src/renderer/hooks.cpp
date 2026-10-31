@@ -53,10 +53,13 @@ class $modify(RendererPlayLayer, PlayLayer) {
         auto renderer = Renderer::get();
         if (renderer && renderer->useOptimizations()) {
             ((decomp_PlayLayer*)this)->optimized_updateVisibility(dt);
+            renderer->updateObjectParticles(dt);
             timer.end();
             return;
         }
 
+        if (renderer)
+            renderer->releaseObjectParticles();
         PlayLayer::updateVisibility(dt);
         // ((decomp_PlayLayer*)this)->virtual_updateVisibility(dt);
         timer.end();

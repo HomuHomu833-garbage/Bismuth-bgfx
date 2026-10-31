@@ -158,6 +158,15 @@ public:
 
     void reset();
 
+    /// Claims / releases the particle systems of objects near the camera.
+    /// With optimizations on, GD's own updateVisibility() (which does this when
+    /// it activates objects) doesn't run, see RendererPlayLayer::updateVisibility.
+    void updateObjectParticles(float dt);
+
+    /// Releases the particles claimed by updateObjectParticles(), before GD's
+    /// own updateVisibility() takes over again.
+    void releaseObjectParticles();
+
     /// The composite group `node` belongs to this frame, or -1.
     i32 getGroupOfNode(ObjectBatchNode* node) const;
 
@@ -187,6 +196,13 @@ private:
     std::unordered_map<GameObject*, usize> objectSRBIndicies;
 
     std::vector<ObjectBatchNode*> batchNodes;
+
+    struct ParticleObject {
+        GameObject* object;
+        bool claimed;
+    };
+    std::vector<ParticleObject> particleObjects;
+    usize claimedParticleCount = 0;
     std::unordered_set<cocos2d::CCNode*> ownNodes;
 
     cocos2d::CCTexture2D* spriteSheets[(i32)SpriteSheet::COUNT] = { nullptr };
