@@ -9,7 +9,6 @@
 #include "renderer/Renderer.hpp"
 #include <gfx/Device.hpp>
 
-#include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/CCDisplayLinkDirector.hpp>
 #include <Geode/modify/CCDirector.hpp>
 #include <Geode/modify/PlayLayer.hpp>
