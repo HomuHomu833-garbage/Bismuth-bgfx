@@ -1,15 +1,17 @@
 #pragma once
 
-#include "Geode/cocos/cocoa/CCGeometry.h"
-#include "gl.hpp"
-#include "ccTypes.h"
-#include "glm/fwd.hpp"
-#include <cstring>
-#include <glm/glm.hpp>
+#include <core/Types.hpp>
 #include <Geode/Geode.hpp>
+#include <glm/glm.hpp>
 #include <chrono>
+#include <cstring>
+#include <filesystem>
 #include <memory>
+#include <optional>
 #include <stdint.h>
+
+// Constants shared with the shaders (color channels, object flags, ...).
+#include "../shaders/bismuth_shared.sh"
 
 #define MOVE_TRIGGER_ID   901
 #define ALPHA_TRIGGER_ID  1007
@@ -29,16 +31,6 @@
 //#define DEBUG_LOG(...) log::info(__VA_ARGS__)
 #define DEBUG_LOG(...)
 
-using u8  = uint8_t;
-using u16 = uint16_t;
-using u32 = uint32_t;
-using u64 = uint64_t;
-
-using i8  = int8_t;
-using i16 = int16_t;
-using i32 = int32_t;
-using i64 = int64_t;
-
 using vec2 = glm::vec2;
 using vec3 = glm::vec3;
 using vec4 = glm::vec4;
@@ -47,17 +39,6 @@ namespace fs = std::filesystem;
 
 // #define BISMUTH_ASSERT(COND) { if (!(COND)) geode::log::error("{}:{}: Assertion failed: {}", fs::path(__FILE__).filename(), __LINE__, #COND); }
 #define BISMUTH_ASSERT(COND)
-
-using usize = uintptr_t;
-using isize = intptr_t;
-
-template <typename T>
-using UPtr = std::unique_ptr<T>;
-
-template <typename T, typename... Args>
-inline std::unique_ptr<T> makeUnique(Args&& ...args) {
-    return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
-}
 
 inline vec2 ccPointToGLM(const cocos2d::CCPoint& point) {
     return vec2(point.x, point.y);
@@ -73,34 +54,12 @@ inline u64 getTime() {
     return (std::chrono::high_resolution_clock::now() - modStartTime).count();
 }
 
-inline usize alignUp(usize value, usize align) {
-    usize rem = value % align;
-    return rem ? value + (align - rem) : value;
-}
-
 std::string byteSizeToString(usize size);
 
-inline bool isNVidiaGPU() {
-    return strcmp((const char*)glGetString(GL_VENDOR), "NVIDIA Corporation") == 0;
-}
-
-inline bool isAMDGPU() {
-    return strcmp((const char*)glGetString(GL_VENDOR), "AMD") == 0;
-}
-
-inline bool isIntelGPU() {
-    return strcmp((const char*)glGetString(GL_VENDOR), "Intel") == 0;
-}
-
-bool isOpenGLAtLeastVersion(u32 major, u32 minor);
-
-void glObjectLabel(GLenum id, GLuint name, GLsizei length, const char* label);
-
-/*
-    Draws a fullscreen quad.
-    VAO is handled automatically.
-*/
-void drawFullscreenQuad();
+/// GPU vendor of Geometry Dash's GL context (GL_VENDOR string).
+bool isNVidiaGPU();
+bool isAMDGPU();
+bool isIntelGPU();
 
 std::optional<std::string> readResourceFile(const fs::path& path);
 

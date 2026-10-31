@@ -3,7 +3,7 @@
 #include <Geode/binding/GameObject.hpp>
 #include <common.hpp>
 #include <span>
-#include "SAOBuffer.hpp"
+#include "BatchData.hpp"
 
 /*
     Objects can have up to 10 group ids. Alpha, move, rotate
@@ -78,6 +78,20 @@ private:
 
 class Renderer;
 
+/*
+    The current state of a group combination. This info can change every frame.
+    Same memory layout as GROUP_STATE_STRIDE uvec4s in the frame buffer
+    (see shaders/bismuth_shared.sh): matrices are column major.
+*/
+struct GroupCombinationState {
+    glm::mat2 positionalTransform;
+    glm::mat2 localTransform;
+    glm::vec2 offset;
+    float opacity;
+    u32 pulseIndex;
+};
+static_assert(sizeof(GroupCombinationState) == GROUP_STATE_STRIDE * sizeof(bismuth::UVec4));
+
 struct StoredGroupStates {
     std::vector<GroupCombinationState> groupStates;
     std::vector<bool> isGroupToggledOn;
@@ -114,16 +128,14 @@ public:
     inline u32 getGroupCombinationCount() const { return groupCombinationCount; }
     inline u32 getTransformCombinationCount() const { return transformCombinationCount; }
 
-    inline void bindGroupStateBuffers() {
-        groupStateBuffer->bindAsStorageBuffer(GROUP_STATE_BUFFER_BINDING);
-        pulseEntryBuffer->bindAsStorageBuffer(PULSE_ENTRY_BUFFER_BINDING);
-    }
-
     inline isize getGroupStateBufferSize() { return groupCombinationCount * sizeof(GroupCombinationState); }
 
     inline std::span<GroupCombinationState> getGroupStates() {
-        return { groupStates, groupStates + getGroupCombinationCount() };
+        return { groupStates.data(), groupStates.data() + getGroupCombinationCount() };
     }
+
+    /// Appends the group states and pulse entries to the per-frame GPU buffer.
+    void writeFrameData(bismuth::FrameBatchData& frame);
 
     inline const std::set<GameObject*> getVanillaRotateGroup(GroupID id) { return vanillaRotateGroups[id]; }
 
@@ -165,18 +177,15 @@ private:
 
     void updatePulseEntries();
 
-    void pulseEntryBufferEnsureSize(usize size);
-
 private:
     Renderer& renderer;
 
     //// VARIABLES OF THE CURRENT GROUP STATES ////
 
-    // GroupCombinationState struct can be found in resources/shaders/shared.h
-    GroupCombinationState* groupStates;
-    UPtr<Buffer> groupStateBuffer = nullptr;
+    std::vector<GroupCombinationState> groupStates;
 
-    UPtr<Buffer> pulseEntryBuffer = nullptr;
+    // (flags, colorOrHSV) pairs, see PULSE_FLAG_* in shaders/bismuth_shared.sh
+    std::vector<u32> pulseEntries;
 
     std::vector<bool> isGroupToggledOn;
 

@@ -360,13 +360,13 @@ void Device::setHostViewRect(bgfx::ViewId view) {
 void Device::flushHost() {
     GLStateGuard guard(host);
     bgfx::glSetHostFramebuffer((u32)guard.snapshot().drawFramebuffer);
-    bgfx::frame();
+    lastFrameNumber = bgfx::frame();
     accumulateStats();
 }
 
 void Device::submitNative() {
     interop->beforeNativeFrame();
-    bgfx::frame();
+    lastFrameNumber = bgfx::frame();
     interop->afterNativeFrame();
     accumulateStats();
 }

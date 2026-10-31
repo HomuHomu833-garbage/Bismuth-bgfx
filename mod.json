@@ -1,7 +1,10 @@
 {
 	"geode": "5.10.1",
 	"gd": {
-		"win": "2.2081"
+		"win": "2.2081",
+		"mac": "2.2081",
+		"android": "2.2081",
+		"ios": "2.2081"
 	},
 	"id": "iliashdz.bismuth",
 	"name": "Bismuth (experimental)",
@@ -20,11 +23,6 @@
 	},
 	"resources": {
 		"files": [
-			"resources/shaders/*.vert",
-			"resources/shaders/*.frag",
-			"resources/shaders/*.comp",
-			"resources/shaders/*.h",
-			"resources/shaders/headers/*.h",
 			"resources/*.json"
 		]
 	},
@@ -34,26 +32,53 @@
 			"type": "bool",
 			"default": true
 		},
+		"renderer_backend": {
+			"name": "Renderer backend",
+			"type": "string",
+			"default": "Auto",
+			"one-of": [
+				"Auto",
+				"Vulkan / Metal",
+				"OpenGL"
+			],
+			"description": "<cg>Auto</c>: Vulkan (Windows, Android) or Metal (macOS, iOS), falling back to OpenGL if they can't be used.\n<cy>Vulkan / Metal</c>: only use Vulkan / Metal.\n<cy>OpenGL</c>: render directly inside Geometry Dash's own OpenGL context.\n\nTakes effect when entering a level."
+		},
+		"culling_mode": {
+			"name": "Culling mode",
+			"type": "string",
+			"default": "Auto",
+			"one-of": [
+				"Auto",
+				"GPU",
+				"CPU"
+			],
+			"description": "Where on-screen objects are found and transformed every frame.\n<cg>Auto</c>: on the GPU (compute shaders) when supported, otherwise on the CPU (multithreaded).\n\nTakes effect when entering a level."
+		},
 		"gpu_core_count": {
 			"name": "GPU core count",
 			"type": "int",
 			"default": 0,
 			"max": 20000,
 			"min": 0,
-			"description": "Here, you can manually specify your GPU core count. If set at 0, Bismuth attempts to find the core count manually. If it can't find it, make sure you set this value correctly. You can also try different values to see how it affects performance."
+			"description": "Only used with GPU culling. Here, you can manually specify your GPU core count. If set at 0, Bismuth attempts to find the core count automatically (Windows only). You can also try different values to see how it affects performance."
+		},
+		"show_debug_overlay": {
+			"name": "Show debug overlay",
+			"type": "bool",
+			"default": false,
+			"description": "Shows renderer information in levels (same as pressing F3). Useful on devices without a keyboard."
+		},
+		"overdraw_view": {
+			"name": "Overdraw view",
+			"type": "bool",
+			"default": false,
+			"description": "Shows a heat map of how many times Bismuth draws each pixel (same as pressing F4)."
 		},
 		"ingame_enable": {
 			"name": "Enable debug tools",
 			"type": "bool",
 			"default": false,
 			"description": "Allows you to enable and disable Bismuth while playing by pressing F8. It also allows you to use Difference Mode by pressing F9 (Difference Mode is very unstable).\n\n WARNING: This option effectively removes any optimization."
-		},
-		
-		"use_mapped_buffers": {
-			"name": "Use persistently mapped buffers",
-			"type": "bool",
-			"default": false,
-			"description": "May work well with integrated GPU, not so much with discrete GPUs (like a graphics card)"
 		}
 	}
 }

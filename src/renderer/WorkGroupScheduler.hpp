@@ -2,9 +2,13 @@
 
 #include <common.hpp>
 #include <ObjectUtils.hpp>
-#include "Buffer.hpp"
+#include "BatchData.hpp"
+#include <array>
 #include <map>
-#include <queue>
+#include <mutex>
+#include <set>
+#include <thread>
+#include <unordered_map>
 
 #define WORK_GROUPS_PER_GPU_CORES 2.5
 
@@ -12,33 +16,28 @@ class Renderer;
 
 using ColorChannelBlendStates = std::array<bool, 1101>;
 
-struct WorkGroupRange {
-    u32 offset, count;
+struct SortedLayerInfo {
+    u32 index = 0;        // layer index inside SortedBatchData
+    u32 spriteCount = 0;
 };
 
+/*
+    All sprites, sorted for one combination of color channel blending states
+    (blending moves sprites between the normal and additive layers).
+*/
 struct SortedObjectBatch {
-    u32 workGroupCount;
-    std::map<LayerKey, WorkGroupRange> workGroupRangePerLayerKey;
-
-    //// BUFFERS ////
-    bool haveBuffersBeenCreated = false;
-    UPtr<Buffer> spriteRemapBuffer;
-    UPtr<Buffer> workGroupBuffer;
-    UPtr<Buffer> drawCommandBuffer;
-    UPtr<PreCulledSprite::Buffer> preCulledSpritesBuffer;
-
-    //// BUFFER DATAS ////
-    std::vector<u32> inputSpriteIndicies;
-    std::vector<WorkGroup> workGroups;
-    std::vector<DrawCommand> drawCommands;
-
-    void bindBuffers();
+    bismuth::SortedBatchData data;
+    std::map<LayerKey, SortedLayerInfo> layerIndexPerKey;
 };
 
 class WorkGroupScheduler {
 public:
-    WorkGroupScheduler();
+    WorkGroupScheduler() = default;
     ~WorkGroupScheduler();
+
+    /// Upper bound of work groups per batch: ~2.5 per GPU core on the GPU path,
+    /// enough small chunks to balance the threads on the CPU path.
+    void setMaxWorkGroupCount(isize count) { maxWorkGroupCount = count; }
 
     void addSprite(
         GameObject* object,
@@ -55,10 +54,19 @@ public:
     SortedObjectBatch* fetchSortedBatchForBlendStates(const ColorChannelBlendStates& blendStates);
 
     inline void waitForJobs() {
-        for (auto& [k, job] : currentGenerationJobs)
-            if (job->thread.joinable())
-                job->thread.join();
+        std::vector<std::thread*> threads;
+        {
+            std::scoped_lock lock(mutex);
+            for (auto& [k, job] : currentGenerationJobs)
+                threads.push_back(&job->thread);
+        }
+        for (auto thread : threads)
+            if (thread->joinable())
+                thread->join();
     }
+
+    /// Batches that were created since the last call (their GPU resources are new).
+    std::vector<SortedObjectBatch*> allBatches();
 
 private:
     void cleanUpFinishedJobs();
@@ -74,25 +82,19 @@ private:
         u32 inputSpriteIndex;
         u32 triCount;
         u32 groupCombinationIndex;
-        GameObject* object;
+        glm::vec2 startPosition;
 
         LayerKey getFullLayerKey(const ColorChannelBlendStates& blendStates) const;
     };
 
     std::vector<SpriteEntry> spriteEntries;
 
-    struct GenerateJob {
-        ColorChannelBlendStates blendStates;
-        UPtr<SortedObjectBatch> sortedBatch;
-    };
-
     struct GenerationJob {
         //// INPUTS ////
         // scheduler may only be accessed if its mutex has been locked!
         WorkGroupScheduler& scheduler;
-        
+
         ColorChannelBlendStates blendStates;
-        UPtr<PreCulledSprite::Buffer> preCulledSprites;
 
         isize maxWorkGroupCount = -1;
 
@@ -100,11 +102,9 @@ private:
         std::thread thread;
 
         //// VARIABLES USED IN GENERATION ////
-        usize currentSpriteIndex;
+        std::map<LayerKey, std::vector<const SpriteEntry*>> sortedSpriteLayers;
 
-        std::unordered_map<LayerKey, std::vector<const SpriteEntry*>> sortedSpriteLayers;
-        std::vector<u32> inputSpriteIndicies;
-        std::vector<WorkGroup> workGroups;
+        inline GenerationJob(WorkGroupScheduler& scheduler) : scheduler(scheduler) {}
 
         inline ~GenerationJob() {
             if (thread.joinable())
@@ -114,22 +114,14 @@ private:
         void generateSortedBatchForBlendStates();
 
         void loadAndSortSprites(const std::vector<SpriteEntry>& sprites);
-
-        void generateWorkGroupsForLayer(
-            LayerKey layerKey,
-            u32 spritesPerWorkGroup,
-            u32& culledIndexBufferOutputIndex
-        );
     };
 
-    std::thread thread;
-
-    isize maxWorkGroupCount = -1;
+    isize maxWorkGroupCount = 8000;
 
     std::map<ColorChannelBlendStates, UPtr<GenerationJob>> currentGenerationJobs;
 
     //// VARIABLES ACCESSED BY ALL THREADS ////
-    
+
     std::mutex mutex;
 
     std::map<ColorChannelBlendStates, UPtr<SortedObjectBatch>> sortedBatchesPerBlendStates;

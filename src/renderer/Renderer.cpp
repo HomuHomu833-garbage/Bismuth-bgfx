@@ -1,18 +1,13 @@
 #include "Renderer.hpp"
 #include "Geode/cocos/CCDirector.h"
 #include "Geode/cocos/kazmath/include/kazmath/mat4.h"
-#include "Geode/cocos/platform/win32/CCGL.h"
-#include "Geode/cocos/robtop/keyboard_dispatcher/CCKeyboardDelegate.h"
 #include "Geode/cocos/sprite_nodes/CCSpriteBatchNode.h"
 #include "GroupManager.hpp"
 #include "HotKey.hpp"
 #include "ObjectBatchNode.hpp"
 #include "SpriteMeshDictionary.hpp"
-#include "ccTypes.h"
 #include "common.hpp"
-#include "glm/fwd.hpp"
-#include "math/ConvexPolygon.hpp"
-#include "math/Line.hpp"
+#include "../cl.hpp"
 #include <Geode/Enums.hpp>
 #include <Geode/binding/GJBaseGameLayer.hpp>
 #include <Geode/binding/GameObject.hpp>
@@ -22,6 +17,8 @@
 #include "ObjectSorter.hpp"
 
 using namespace geode::prelude;
+using namespace bismuth;
+namespace gfx = bismuth::gfx;
 
 static Renderer* currentRenderer;
 
@@ -39,13 +36,62 @@ u32 convertToShaderHSV(const ccHSVValue& hsv) {
     return ret;
 }
 
+//// DEVICE SETUP ////
+
+static gfx::DeviceOptions deviceOptionsFromSettings() {
+    gfx::DeviceOptions options;
+
+    auto backend = Mod::get()->getSettingValue<std::string>("renderer_backend");
+    if (backend == "OpenGL")
+        options.backend = gfx::BackendPreference::OpenGL;
+    else if (backend == "Vulkan / Metal")
+        options.backend = gfx::BackendPreference::Native;
+    else
+        options.backend = gfx::BackendPreference::Auto;
+
+    auto culling = Mod::get()->getSettingValue<std::string>("culling_mode");
+    if (culling == "GPU")
+        options.culling = gfx::CullingPreference::Gpu;
+    else if (culling == "CPU")
+        options.culling = gfx::CullingPreference::Cpu;
+    else
+        options.culling = gfx::CullingPreference::Auto;
+
+    return options;
+}
+
+/*
+    bgfx stays initialized between levels (creating a Vulkan device per level
+    would slow down level loading). It's re-created when the settings change or
+    when Geometry Dash's GL context was replaced (Android after backgrounding,
+    window recreation).
+*/
+bool ensureBismuthDevice(std::string& report) {
+    static gfx::DeviceOptions lastOptions;
+    auto& device = gfx::Device::get();
+    auto options = deviceOptionsFromSettings();
+
+    if (device.isInitialized()) {
+        bool changed = options.backend != lastOptions.backend || options.culling != lastOptions.culling;
+        if (changed || device.isHostContextLost())
+            device.shutdown();
+    }
+
+    if (!device.isInitialized()) {
+        if (!device.init(options, report))
+            return false;
+        lastOptions = options;
+    }
+    return true;
+}
+
 Renderer::~Renderer() { terminate(); }
 
 class FinishNode : public CCNode {
 public:
-    void draw() {
+    void draw() override {
         if (currentRenderer)
-            currentRenderer->finish();        
+            currentRenderer->finish();
     }
 };
 
@@ -53,32 +99,34 @@ bool Renderer::init(PlayLayer* layer, CCArray* levelObjects) {
     if (currentRenderer)
         return false;
     currentRenderer = this;
-    
-    if (!isOpenGLAtLeastVersion(4, 3)) {
-        Notification::create(
-            "Your device doesn't support the required OpenGL 4.3\nPlease update your drivers",
-            NotificationIcon::Error,
-            5.0f
-        )->show();
-        log::error("Device doesn't support OpenGL 4.3. OpenGL Version: {}", (const char*)glGetString(GL_VERSION));
-        return false;
-    }
-
-    if (!hasLoadedNewerOpenGLFunctions())
-        loadNewerOpenGLFunctions();
-
-    glGenQueries(1, &timeElapsedQuery);
 
     this->layer = layer;
-    
-    auto size = CCDirector::get()->getWinSize();
+
+    for (auto& handle : spriteSheetHandles)
+        handle = BGFX_INVALID_HANDLE;
 
     if (!Mod::get()->getSettingValue<bool>("enabled"))
         return false;
 
-    ingameEnableDisable = Mod::get()->getSettingValue<bool>("ingame_enable");
+    std::string report;
+    if (!ensureBismuthDevice(report)) {
+        Notification::create(
+            "Bismuth couldn't start a renderer on this device.\nThe game will render normally.",
+            NotificationIcon::Error,
+            5.0f
+        )->show();
+        log::error("Bismuth: no usable renderer:\n{}", report);
+        return false;
+    }
 
-    log::info("OpenGL Version: {}", (const char*)glGetString(GL_VERSION));
+    auto& device = gfx::Device::get();
+    if (!report.empty())
+        log::info("Bismuth: renderer fallbacks:\n{}", report);
+
+    ingameEnableDisable = Mod::get()->getSettingValue<bool>("ingame_enable");
+    debugTextEnabled = Mod::get()->getSettingValue<bool>("show_debug_overlay");
+
+    log::info("Bismuth: {}", device.describe());
 
     auto tcache = cocos2d::CCTextureCache::get();
     // TODO: Add text sheet
@@ -88,6 +136,12 @@ bool Renderer::init(PlayLayer* layer, CCArray* levelObjects) {
     spriteSheets[(i32)SpriteSheet::GLOW]     = tcache->addImage("GJ_GameSheetGlow.png", false);
     spriteSheets[(i32)SpriteSheet::FIRE]     = tcache->addImage("FireSheet_01.png", false);
     spriteSheets[(i32)SpriteSheet::PIXEL]    = tcache->addImage("PixelSheet_01.png", false);
+
+    for (i32 i = 0; i < (i32)SpriteSheet::COUNT; i++) {
+        auto texture = spriteSheets[i];
+        if (texture)
+            spriteSheetHandles[i] = hostTextures.import(texture->getName(), texture->getPixelsWide(), texture->getPixelsHigh());
+    }
 
     SpriteMeshDictionary::loadFromFile("spriteMeshes.json");
 
@@ -101,38 +155,11 @@ bool Renderer::init(PlayLayer* layer, CCArray* levelObjects) {
     log::info("Level contains {} object(s)", levelObjects->count());
     log::info("Sorting objects...");
     for (auto object : CCArrayExt<GameObject*>(levelObjects)) {
-        if (object == layer->m_anticheatSpike) {
-            DEBUG_LOG("- anti-cheat spike");
+        if (object == layer->m_anticheatSpike)
             continue;
-        }
 
         if (object->isTrigger() || object->m_isHide || object->m_objectID == GUIDE_OBJECT_ID)
             continue;
-
-        DEBUG_LOG("- {}, id: {}", (void*)object, object->m_objectID);
-        DEBUG_LOG("  - rotation: {}, {}", object->m_startRotationX, object->m_startRotationY);
-        DEBUG_LOG("  - scale: {}, {}", object->m_startScaleX, object->m_startScaleY);
-        DEBUG_LOG("  - flip: {}, {}", object->m_startFlipX, object->m_startFlipX);
-        DEBUG_LOG("  - zlayer: {}", zLayerAsString(object->getObjectZLayer()));
-        DEBUG_LOG("  - zorder: {}", object->getObjectZOrder());
-        DEBUG_LOG("  - blending: {}", object->m_baseOrDetailBlending);
-        DEBUG_LOG("  - spritesheet: {}", object->getParentMode());
-        DEBUG_LOG("  - glowColorIsLBG: {}", object->m_glowColorIsLBG);
-        DEBUG_LOG("  - customGlowColor: {}", object->m_customGlowColor);
-        DEBUG_LOG("  - opacityMod: {}", object->m_opacityMod);
-        DEBUG_LOG("  - isDecoration2: {}", object->m_isDecoration2);
-        DEBUG_LOG("  - colorSprite: {}", object->m_colorSprite);
-        DEBUG_LOG("  - glowSprite: {}", object->m_glowSprite);
-        DEBUG_LOG("  - isColorSpriteBlack: {}", object->m_isColorSpriteBlack);
-        DEBUG_LOG("  - isObjectBlack: {}", object->m_isObjectBlack);
-        DEBUG_LOG("  - activeMainColorID: {}", object->m_activeMainColorID);
-        DEBUG_LOG("  - activeDetailColorID: {}", object->m_activeDetailColorID);
-        if (object->m_baseColor && object->m_baseColor->m_usesHSV)
-            DEBUG_LOG("  - baseHSV: {} {} {} {} {}", object->m_baseColor->m_hsv.h, object->m_baseColor->m_hsv.s, object->m_baseColor->m_hsv.v, object->m_baseColor->m_hsv.absoluteSaturation, object->m_baseColor->m_hsv.absoluteBrightness);
-        if (object->m_detailColor && object->m_detailColor->m_usesHSV)
-            DEBUG_LOG("  - detailHSV: {} {} {} {} {}", object->m_detailColor->m_hsv.h, object->m_detailColor->m_hsv.s, object->m_detailColor->m_hsv.v, object->m_detailColor->m_hsv.absoluteSaturation, object->m_detailColor->m_hsv.absoluteBrightness);
-        if (object->getHasRotateAction())
-            DEBUG_LOG("  - rotationDelta: {}", ((EnhancedGameObject*)object)->m_rotationDelta);
 
         sorter.addGameObject(object);
     }
@@ -143,11 +170,21 @@ bool Renderer::init(PlayLayer* layer, CCArray* levelObjects) {
     log::info("Generating static rendering buffer....");
 
     renderedGameObjectCount = objects.size();
-    
-    generateStaticRenderingBuffer(objects);
+
+    bismuth::StaticBatchData staticData;
+    generateStaticRenderingBuffer(objects, staticData);
 
     u32 groupCombCount = groupManager.getGroupCombinationCount();
     log::info("{} group combinations detected", groupCombCount);
+
+    // Work group sizing for culling.
+    if (device.getCullingPath() == gfx::CullingPath::Gpu) {
+        isize cores = getGPUCoreCount();
+        objectBatch.getScheduler().setMaxWorkGroupCount(cores > 0 ? (isize)(cores * WORK_GROUPS_PER_GPU_CORES) : 8000);
+    } else {
+        // Small chunks so the CPU culling threads stay balanced.
+        objectBatch.getScheduler().setMaxWorkGroupCount(4096);
+    }
 
     log::info("Generating vertex buffer...");
 
@@ -158,37 +195,21 @@ bool Renderer::init(PlayLayer* layer, CCArray* levelObjects) {
 
     for (auto object : objects)
         objectBatch.writeGameObject(object);
-    objectBatch.finishWriting();
+    objectBatch.finishWriting(staticData);
     generateBatchNodes();
 
     log::info("Sprite count: {}", objectBatch.getSpriteCount());
 
-    std::map<std::string, std::string> shaderMacroVariables;
-    // shaderMacroVariables["TOTAL_OBJECT_COUNT"] = std::to_string(renderedGameObjectCount == 0 ? 1 : renderedGameObjectCount);
-    // shaderMacroVariables["GROUP_ID_LIMIT"]     = std::to_string(groupCombCount);
-    // shaderMacroVariables["TOTAL_SPRITE_COUNT"] = std::to_string(objectBatch.getSpriteCount());
-
-    log::info("Compiling shaders...");
-    shader = Shader::create("objectDrawing.vert", "objectDrawing.frag", shaderMacroVariables);
-    if (!shader)
+    if (!batchRenderer.init(std::move(staticData), device.getCullingPath(), device.getRendererType())) {
+        log::error("Bismuth: failed to create GPU resources");
         return false;
+    }
 
-    log::info("Compiled objectDrawing shader");
-
-    cullingComputeShader = Shader::createCompute("objectCulling.comp", shaderMacroVariables);
-    if (!cullingComputeShader)
-        return false;
-
-    log::info("Compiled objectCulling shader");
-
-    colorChannelBufferObject = Buffer::createDynamicDraw("ColorChannelBuffer", sizeof(ColorChannelBuffer));
-    if (!colorChannelBufferObject)
-        return false;
-    colorChannelBuffer = (ColorChannelBuffer*)colorChannelBufferObject->mapWriteOnly();
-
-    gameStateBuffer = Buffer::createDynamicDraw("GameStateBuffer", sizeof(GameStateBuffer));
-    if (!gameStateBuffer)
-        return false;
+    // In-context OpenGL: bgfx must create its texture objects before they can be
+    // pointed at cocos2d's textures.
+    if (device.isHostMode())
+        device.flushHost();
+    hostTextures.finishImports();
 
     debugText = CCLabelBMFont::create("", "chatFont.fnt");
     debugTextOutline1 = CCLabelBMFont::create("", "chatFont.fnt");
@@ -214,25 +235,22 @@ bool Renderer::init(PlayLayer* layer, CCArray* levelObjects) {
     debugTextOutline2->setScale(0.5);
     layer->addChild(debugTextOutline2, 999);
 
-    /*
-    if (useOptimizations()) {
-        // I hope this doesn't cause any issues
-        for (auto& group : layer->m_optimizedGroups) {
-            if (group)
-                group->release();
-            group = nullptr;
-        }
-    }
-    */
-
     setZOrder(-99999);
+    active = true;
     setEnabled(true);
 
     rendererStartTime = getTime();
 
-    layer->m_objectLayer->addChild(new FinishNode, 99999);
+    auto finishNode = new FinishNode;
+    finishNode->autorelease();
+    layer->m_objectLayer->addChild(finishNode, 99999);
+    ownNodes.insert(finishNode);
+    ownNodes.insert(this);
 
     reset();
+
+    if (Mod::get()->getSettingValue<bool>("overdraw_view"))
+        overdrawView.setEnabled(true);
 
     if (ingameEnableDisable) {
         Notification::create(
@@ -262,67 +280,91 @@ void Renderer::generateBatchNodes() {
 }
 
 void Renderer::terminate() {
-    glDeleteQueries(1, &timeElapsedQuery);
+    if (currentRenderer != this)
+        return;
+
+    auto interop = gfx::Device::get().getInterop();
+    for (auto& target : sharedTargets) {
+        if (interop && target.platform)
+            interop->destroyTarget(target);
+    }
+    sharedTargets.clear();
+
+    overdrawView.releaseResources();
+    batchRenderer.shutdown();
+    hostTextures.destroyAll();
+
     currentRenderer = nullptr;
     log::info("Renderer terminated");
 }
 
-void Renderer::prepareShaderUniforms() {
+void Renderer::deactivate(const char* reason) {
+    if (!active)
+        return;
+
+    log::warn("Bismuth: disabled for this level: {}", reason);
+    setEnabled(false);
+    active = false;
+
+    // Resources are released with the renderer; with a lost GL context they're
+    // abandoned by gfx::Device::shutdown at the next level.
+}
+
+void Renderer::prepareGameState() {
     kmMat4 matrixP;
-	kmMat4 matrixMV;
-	kmMat4 matrixMVP;
-	
-	kmGLGetMatrix(KM_GL_PROJECTION, &matrixP);
-	kmGLGetMatrix(KM_GL_MODELVIEW, &matrixMV);
-	
-	kmMat4Multiply(&matrixMVP, &matrixP, &matrixMV);
+    kmMat4 matrixMV;
+    kmMat4 matrixMVP;
 
-    // shader->setTextureArray("u_spriteSheets", (i32)SpriteSheet::COUNT, spriteSheets);
+    kmGLGetMatrix(KM_GL_PROJECTION, &matrixP);
+    kmGLGetMatrix(KM_GL_MODELVIEW, &matrixMV);
 
-    (kmMat4&)gameState.u_mvp = matrixMVP;
-    gameState.u_timer = gameTimer;
-    gameState.u_cameraViewSize = glm::vec2(layer->m_cameraWidth, layer->m_cameraHeight);
+    kmMat4Multiply(&matrixMVP, &matrixP, &matrixMV);
+
+    std::memcpy(gameState.mvp, matrixMVP.mat, sizeof(gameState.mvp));
+    gameState.timer = gameTimer;
+    gameState.cameraViewSize = glm::vec2(layer->m_cameraWidth, layer->m_cameraHeight);
     auto winsize = CCDirector::get()->getWinSize();
-    gameState.u_winSize = glm::vec2(winsize.width, winsize.height);
-    gameState.u_screenRight = CCDirector::get()->getScreenRight();
-    gameState.u_cameraUnzoomedX = layer->m_cameraUnzoomedX;
+    gameState.winSize = glm::vec2(winsize.width, winsize.height);
+    gameState.screenRight = CCDirector::get()->getScreenRight();
+    gameState.cameraUnzoomedX = layer->m_cameraUnzoomedX;
     ccColor3B specialLightBG = GameToolbox::transformColor(layer->m_effectManager->activeColorForIndex(COLOR_CHANNEL_BG), 0.0, -0.2, 0.2);
-    gameState.u_specialLightBGColor = ccColor3BToGLM(specialLightBG);
-
-    auto winSize = CCDirector::get()->getWinSize();
+    gameState.specialLightBGColor = ccColor3BToGLM(specialLightBG);
 
     vec2 cameraBottomLeft  = ccPointToGLM(layer->m_objectLayer->convertToNodeSpace({0, 0}));
-    vec2 cameraBottomRight = ccPointToGLM(layer->m_objectLayer->convertToNodeSpace({winSize.width, 0}));
-    vec2 cameraTopLeft     = ccPointToGLM(layer->m_objectLayer->convertToNodeSpace({0, winSize.height}));
+    vec2 cameraBottomRight = ccPointToGLM(layer->m_objectLayer->convertToNodeSpace({winsize.width, 0}));
+    vec2 cameraTopLeft     = ccPointToGLM(layer->m_objectLayer->convertToNodeSpace({0, winsize.height}));
 
     vec2 cameraRight = cameraBottomRight - cameraBottomLeft;
     vec2 cameraUp    = cameraTopLeft     - cameraBottomLeft;
 
-    gameState.u_cameraPosition = cameraBottomLeft;
+    gameState.cameraPosition = cameraBottomLeft;
+    gameState.cameraRight = glm::normalize(cameraRight);
+    gameState.cameraUp    = glm::normalize(cameraUp);
+    gameState.cameraSize  = glm::vec2 { glm::length(cameraRight), glm::length(cameraUp) };
 
-    gameState.u_cameraRight = glm::normalize(cameraRight);
-    gameState.u_cameraUp    = glm::normalize(cameraUp);
-
-    gameState.u_cameraSize = glm::vec2 { glm::length(cameraRight), glm::length(cameraUp) };
-
-    gameState.u_gameStateFlags = 0;
+    gameState.flags = 0;
     if (layer->m_player1->m_isDead)
-        gameState.u_gameStateFlags |= GAME_STATE_IS_PLAYER_DEAD;
+        gameState.flags |= GAME_STATE_IS_PLAYER_DEAD;
 
     if (layer->m_skipAudioStep)
-        gameState.u_audioScale = FMODAudioEngine::sharedEngine()->getMeteringValue();
+        gameState.audioScale = FMODAudioEngine::sharedEngine()->getMeteringValue();
     else
-        gameState.u_audioScale = layer->m_audioEffectsLayer->m_audioScale;
-    
-    if (layer->m_isSilent || (layer->m_isPracticeMode && !layer->m_practiceMusicSync))
-        gameState.u_audioScale = 0.5;
+        gameState.audioScale = layer->m_audioEffectsLayer->m_audioScale;
 
-    gameStateBuffer->write(&gameState, sizeof(gameState));
+    if (layer->m_isSilent || (layer->m_isPracticeMode && !layer->m_practiceMusicSync))
+        gameState.audioScale = 0.5;
 }
 
-void Renderer::prepareColorChannelBuffer() {
+void Renderer::prepareColorChannels() {
     auto timer = BProfiler::start("Generate color channel buffer");
-    PROFILER_PUSH("Renderer::prepareColorChannelBuffer");
+    PROFILER_PUSH("Renderer::prepareColorChannels");
+
+    // The color channels come first in the frame buffer, 4 packed RGBA8 per uvec4.
+    frameData.buffer.assign(COLOR_CHANNEL_UVEC4S, bismuth::UVec4(0));
+    auto setChannel = [&](u32 id, u8 r, u8 g, u8 b, u8 a) {
+        if (id < COLOR_CHANNEL_COUNT)
+            frameData.buffer[id / 4][id % 4] = u32(r) | (u32(g) << 8) | (u32(b) << 16) | (u32(a) << 24);
+    };
 
     auto effectManager = layer->m_effectManager;
 
@@ -330,183 +372,263 @@ void Renderer::prepareColorChannelBuffer() {
         auto sprite = effectManager->m_colorActionSpriteVector[i];
         if (sprite == nullptr)
             continue;
-
-        auto id = sprite->m_colorID;
-
-        auto& channelColor = colorChannelBuffer->u_channelColors[id];
-        channelColor.r = sprite->m_color.r;
-        channelColor.g = sprite->m_color.g;
-        channelColor.b = sprite->m_color.b;
-        channelColor.a = (u8)sprite->m_opacity;
+        setChannel(sprite->m_colorID, sprite->m_color.r, sprite->m_color.g, sprite->m_color.b, (u8)sprite->m_opacity);
     }
 
-    colorChannelBuffer->u_channelColors[COLOR_CHANNEL_BLACK] = { 0, 0, 0, 255 };
-    colorChannelBufferObject->flush(0, colorChannelBufferObject->getSize());
-    
+    setChannel(COLOR_CHANNEL_BLACK, 0, 0, 0, 255);
+
     PROFILER_POP();
     timer.end();
 }
 
-void Renderer::generateStaticRenderingBuffer(std::vector<GameObject*>& objects) {
-    std::vector<ObjectInfo> objectInfos;
-    objectInfos.resize(renderedGameObjectCount);
+void Renderer::generateStaticRenderingBuffer(std::vector<GameObject*>& objects, bismuth::StaticBatchData& out) {
+    using bismuth::UVec4;
+    using bismuth::floatBits;
+
+    out.staticBuffer.resize(objects.size() * OBJECT_INFO_STRIDE);
 
     usize index = 0;
 
     for (auto object : objects) {
-        auto objectInfo = &objectInfos[index];
-
+        float rotationSpeed = 0.0;
         if (object->getHasRotateAction())
-            objectInfo->rotationSpeed = ((EnhancedGameObject*)object)->m_rotationDelta; // 'rotationDelta' is incorrect naming
-        else
-            objectInfo->rotationSpeed = 0.0;
+            rotationSpeed = ((EnhancedGameObject*)object)->m_rotationDelta; // 'rotationDelta' is incorrect naming
 
-        objectInfo->flags = 0;
+        u32 flags = 0;
+        float audioScaleMin = 0.0, audioScaleMax = 0.0;
         if (object->m_usesAudioScale) {
-            objectInfo->flags |= OBJECT_FLAG_USES_AUDIO_SCALE;
-        
+            flags |= OBJECT_FLAG_USES_AUDIO_SCALE;
+
             if (object->m_customAudioScale) {
-                objectInfo->flags |= OBJECT_FLAG_CUSTOM_AUDIO_SCALE;
-                objectInfo->audioScaleMin = object->m_minAudioScale;
-                objectInfo->audioScaleMax = object->m_maxAudioScale;
+                flags |= OBJECT_FLAG_CUSTOM_AUDIO_SCALE;
+                audioScaleMin = object->m_minAudioScale;
+                audioScaleMax = object->m_maxAudioScale;
             }
-            
+
             if (typeinfo_cast<RingObject*>(object))
-                objectInfo->flags |= OBJECT_FLAG_IS_ORB;
+                flags |= OBJECT_FLAG_IS_ORB;
         }
 
-        objectInfo->baseColorChannelId = object->m_activeMainColorID;
-        objectInfo->detailColorChannelId = object->m_activeDetailColorID;
-
+        u32 baseHSV = 0, detailHSV = 0;
         if (object->m_baseColor && object->m_baseColor->m_usesHSV) {
-            objectInfo->flags |= OBJECT_FLAG_HAS_BASE_HSV;
-            objectInfo->baseHSV = convertToShaderHSV(object->m_baseColor->m_hsv);
+            flags |= OBJECT_FLAG_HAS_BASE_HSV;
+            baseHSV = convertToShaderHSV(object->m_baseColor->m_hsv);
         }
 
         if (object->m_detailColor && object->m_detailColor->m_usesHSV) {
-            objectInfo->flags |= OBJECT_FLAG_HAS_DETAIL_HSV;
-            objectInfo->detailHSV = convertToShaderHSV(object->m_detailColor->m_hsv);
+            flags |= OBJECT_FLAG_HAS_DETAIL_HSV;
+            detailHSV = convertToShaderHSV(object->m_detailColor->m_hsv);
         }
 
-        objectInfo->opacity = (object->m_opacityMod2 > 0.0) ? object->m_opacityMod2 : 1.0;
+        float opacity = (object->m_opacityMod2 > 0.0) ? object->m_opacityMod2 : 1.0;
 
-        if (object->m_isInvisibleBlock) objectInfo->flags |= OBJECT_FLAG_IS_INVISIBLE_BLOCK;
-        if (object->m_customGlowColor)  objectInfo->flags |= OBJECT_FLAG_SPECIAL_GLOW_COLOR;
+        if (object->m_isInvisibleBlock) flags |= OBJECT_FLAG_IS_INVISIBLE_BLOCK;
+        if (object->m_customGlowColor)  flags |= OBJECT_FLAG_SPECIAL_GLOW_COLOR;
         if (object->m_objectType == GameObjectType::Solid)
-            objectInfo->flags |= OBJECT_FLAG_IS_STATIC_OBJECT;
-        objectInfo->fadeMargin = object->m_fadeMargin;
+            flags |= OBJECT_FLAG_IS_STATIC_OBJECT;
+
+        UVec4* info = &out.staticBuffer[index * OBJECT_INFO_STRIDE];
+        info[0] = UVec4(floatBits(rotationSpeed), flags, floatBits(audioScaleMin), floatBits(audioScaleMax));
+        info[1] = UVec4(floatBits(object->m_fadeMargin), floatBits(opacity), (u32)object->m_activeMainColorID, baseHSV);
+        info[2] = UVec4((u32)object->m_activeDetailColorID, detailHSV, 0, 0);
 
         objectSRBIndicies[object] = index;
         index++;
     }
-
-    srbBuffer = Buffer::createStaticDraw("ObjectInfoBuffer", objectInfos.data(), objectInfos.size() * sizeof(ObjectInfo));
-};
-
-static glm::vec2 linePoint = { 100, 200 };
-static float     lineAngle = 0;
-
-static ConvexPolygon polygon;
-
-static isize triangleIndex = 0;
-
-static void drawLine(Renderer* ren, const Line& line, const glm::vec4& color) {
-    glm::vec2 npp = { line.normal.y, -line.normal.x };
-
-    glm::vec2 p1 = line.firstPoint() + npp *  10000.f;
-    glm::vec2 p2 = line.firstPoint() + npp * -10000.f;
-
-    ren->drawLine(p1, p2, color);
 }
 
-static void drawCross(Renderer* ren, const glm::vec2& point, const glm::vec4& color) {
-    ren->drawLine(point + glm::vec2(-5, -5), point + glm::vec2( 5,  5), color);
-    ren->drawLine(point + glm::vec2(-5,  5), point + glm::vec2( 5, -5), color);
+//// COMPOSITE GROUPS ////
+
+LayerBlend Renderer::blendForLayer(const LayerKey& key) {
+    return (key.blending || key.spriteSheet == SpriteSheet::GLOW) ? LayerBlend::Additive : LayerBlend::Normal;
 }
 
-float CAMERA_CULL_RECT_SCALE = 1.3;
+void Renderer::computeCompositeGroups() {
+    groups.clear();
+    groupOfNode.clear();
+
+    std::unordered_set<CCNode*> layerNodes(batchNodes.begin(), batchNodes.end());
+
+    CompositeGroup* current = nullptr;
+    for (auto child : CCArrayExt<CCNode*>(layer->m_objectLayer->getChildren())) {
+        if (layerNodes.contains(child)) {
+            auto node = static_cast<ObjectBatchNode*>(child);
+            if (!node->isVisible() || !objectBatch.shouldDraw(node->getLayerKey()))
+                continue;
+
+            if (!current) {
+                if (groups.size() < RendererViews::MaxGroups)
+                    groups.emplace_back();
+                // Over the limit (extremely unlikely): keep adding to the last group.
+                current = &groups.back();
+            }
+            current->nodes.push_back(node);
+            groupOfNode[node] = (i32)groups.size() - 1;
+            continue;
+        }
+
+        // Any other visible node is drawn by cocos2d between Bismuth's layers.
+        if (child->isVisible() && !ownNodes.contains(child) && !overdrawView.isOwnNode(child))
+            current = nullptr;
+    }
+}
+
+i32 Renderer::getGroupOfNode(ObjectBatchNode* node) const {
+    auto it = groupOfNode.find(node);
+    return it == groupOfNode.end() ? -1 : it->second;
+}
+
+bool Renderer::ensureSharedTargets(u32 count, u32 width, u32 height) {
+    auto interop = gfx::Device::get().getInterop();
+    if (!interop)
+        return false;
+
+    if (width != sharedTargetWidth || height != sharedTargetHeight) {
+        for (auto& target : sharedTargets)
+            interop->destroyTarget(target);
+        sharedTargets.clear();
+        sharedTargetWidth = width;
+        sharedTargetHeight = height;
+    }
+
+    while (sharedTargets.size() < count) {
+        sharedTargets.emplace_back();
+        if (!interop->createTarget(sharedTargets.back(), width, height)) {
+            sharedTargets.pop_back();
+            return false;
+        }
+        log::info("Bismuth: created shared render target {} ({}x{})", sharedTargets.size(), width, height);
+    }
+    return true;
+}
+
+void Renderer::drawGroupLayers(const CompositeGroup& group, bgfx::ViewId view, bool toSharedTarget) {
+    auto sorted = objectBatch.getSortedBatch();
+    if (!sorted)
+        return;
+
+    for (auto node : group.nodes) {
+        const LayerKey& key = node->getLayerKey();
+        auto it = sorted->layerIndexPerKey.find(key);
+        if (it == sorted->layerIndexPerKey.end())
+            continue;
+
+        auto texture = getSpriteSheetHandle(key.spriteSheet);
+        if (!bgfx::isValid(texture))
+            continue;
+
+        batchRenderer.drawLayer(view, it->second.index, texture, blendForLayer(key), toSharedTarget);
+
+        if (overdrawView.isEnabled())
+            overdrawView.countLayer(it->second.index, texture);
+    }
+}
+
+//// FRAME ////
 
 void Renderer::draw() {
-    PROFILER_PUSH("Renderer::draw");
-    
-    if (debugTextEnabled) {
-        glBeginQuery(GL_TIME_ELAPSED, timeElapsedQuery);
-    }
+    if (!enabled || !active)
+        return;
 
-    /*
-    log::info("TEST");
-    for (auto& [k, v] : layer->m_effectManager->m_pulseEffectMap) {
-        log::info("  - {}", k);
+    PROFILER_PUSH("Renderer::draw");
+
+    auto& device = gfx::Device::get();
+    if (device.isHostContextLost()) {
+        deactivate("Geometry Dash's OpenGL context was lost");
+        PROFILER_POP();
+        return;
     }
-    */
 
     fetchBlendingStates();
+    prepareGameState();
 
-    u64 prevTime = getTime();
-    // storeGLStates();
-    prepareShaderUniforms();
-    if (!isPaused()) {
-        prepareColorChannelBuffer();
-    
-        // auto timer = BProfiler::start("Generate group state buffer");
+    const bool paused = isPaused();
+    if (!paused) {
+        prepareColorChannels();
         groupManager.updateGroupStateBuffer();
-        // timer.end();
-
-        // glm::vec2 bl = view.bottomLeft;
-        // glm::vec2 br = view.bottomLeft + view.rightVector;
-        // glm::vec2 tl = view.bottomLeft + view.upVector;
-        // glm::vec2 tr = view.bottomLeft + view.rightVector + view.upVector;
-
-        // drawLine(bl, br, glm::vec4(1, 1, 0, 1));
-        // drawLine(br, tr, glm::vec4(1, 1, 0, 1));
-        // drawLine(tr, tl, glm::vec4(1, 1, 0, 1));
-        // drawLine(tl, bl, glm::vec4(1, 1, 0, 1));
-
-        objectBatch.predraw();
+        groupManager.writeFrameData(frameData);
     }
+
+    auto sorted = objectBatch.predraw();
+    batchRenderer.setSortedBatch(&sorted->data);
+
+    // While paused nothing moves, the previous culling results stay valid.
+    const bool needsCulling = !paused || !hasCulledOnce || lastSortedBatch != &sorted->data;
+    if (needsCulling)
+        batchRenderer.updateFrame(frameData, gameState);
+
+    computeCompositeGroups();
 
     renderingTimer.start();
 
-    /*
-    glm::vec2 normal { glm::cos(glm::radians(lineAngle)), glm::sin(glm::radians(lineAngle)) };
+    if (device.isHostMode()) {
+        if (needsCulling) {
+            batchRenderer.cull(RendererViews::Compute);
+            device.flushHost();
+        }
+        overdrawView.beginFrame();
+    } else {
+        gfx::GLint viewport[4] = {};
+        gfx::glf().glGetIntegerv(gfx::gl::VIEWPORT, viewport);
+        const u32 width = (u32)std::max(viewport[2], 1);
+        const u32 height = (u32)std::max(viewport[3], 1);
 
-    drawLine(linePoint, linePoint + normal * 10.f, glm::vec4(0, 1, 0, 1));
+        // Creating targets submits bgfx frames, so it must happen before any other work.
+        u32 targetCount = (u32)groups.size() + (overdrawView.isEnabled() ? 1 : 0);
+        if (!ensureSharedTargets(targetCount, width, height)) {
+            deactivate("couldn't create render targets shared with OpenGL");
+            renderingTimer.stop();
+            PROFILER_POP();
+            return;
+        }
 
-    Line line { linePoint, normal };
+        if (needsCulling)
+            batchRenderer.cull(RendererViews::Compute);
 
-    ::drawLine(this, line, glm::vec4(1, 0, 0, 1));
+        overdrawView.beginFrame(width, height);
 
-    for (const auto& mline : polygon.getLines()) {
-        ::drawLine(this, mline, glm::vec4(0.5, 0.5, 0.5, 1));
-    
-        auto inter = line.intersectionWith(mline);
-        if (inter)
-            drawCross(this, inter.value(), glm::vec4(0, 0, 1, 1));
+        for (u32 g = 0; g < groups.size(); g++) {
+            bgfx::ViewId view = RendererViews::GroupFirst + g;
+            bgfx::setViewFrameBuffer(view, sharedTargets[g].framebuffer);
+            bgfx::setViewRect(view, 0, 0, (u16)width, (u16)height);
+            bgfx::setViewClear(view, BGFX_CLEAR_COLOR, 0x00000000);
+            bgfx::touch(view);
+            drawGroupLayers(groups[g], view, true);
+        }
+
+        if (overdrawView.isEnabled())
+            overdrawView.renderHeatMap(&sharedTargets[groups.size()], width, height);
+
+        device.submitNative();
+        nativeFrameSubmitted = true;
     }
 
-    std::vector<glm::vec2> verticies;
+    hasCulledOnce = true;
+    lastSortedBatch = &sorted->data;
 
-    polygon.triangulate([&](const auto& p1, const auto& p2, const auto& p3) {
-        verticies.push_back(p1);
-        verticies.push_back(p2);
-        verticies.push_back(p3);
-    });
+    PROFILER_POP();
+}
 
-    if (triangleIndex >= (verticies.size() / 3))
-        triangleIndex = 0;
+void Renderer::drawLayerNode(ObjectBatchNode* node) {
+    if (!enabled || !active)
+        return;
 
-    if (verticies.size() != 0) {
-        auto p1 = verticies[triangleIndex * 3 + 0];
-        auto p2 = verticies[triangleIndex * 3 + 1];
-        auto p3 = verticies[triangleIndex * 3 + 2];
+    i32 g = getGroupOfNode(node);
+    if (g < 0 || groups[g].nodes.front() != node)
+        return; // drawn together with the first layer of its group
 
-        drawLine(p1, p2, glm::vec4(0, 1, 0, 1));
-        drawLine(p2, p3, glm::vec4(0, 1, 0, 1));
-        drawLine(p3, p1, glm::vec4(0, 1, 0, 1));
+    PROFILER_PUSH("Renderer::drawLayerNode");
+
+    auto& device = gfx::Device::get();
+    if (device.isHostMode()) {
+        device.setHostViewRect(RendererViews::HostDraw);
+        bgfx::setViewFrameBuffer(RendererViews::HostDraw, BGFX_INVALID_HANDLE);
+        drawGroupLayers(groups[g], RendererViews::HostDraw, false);
+        device.flushHost();
+    } else if (nativeFrameSubmitted && (u32)g < sharedTargets.size()) {
+        device.getInterop()->beforeHostRead();
+        device.getCompositor().draw(sharedTargets[g]);
     }
-    */
-
-    // restoreGLStates();
 
     PROFILER_POP();
 }
@@ -514,11 +636,16 @@ void Renderer::draw() {
 void Renderer::finish() {
     renderingTimer.stop();
 
-    if (debugTextEnabled) {
-        renderTime = 0;
-        glEndQuery(GL_TIME_ELAPSED);
-        glGetQueryObjecti64v(timeElapsedQuery, GL_QUERY_RESULT, &renderTime);
+    auto& device = gfx::Device::get();
+    if (active && nativeFrameSubmitted) {
+        if (overdrawView.isEnabled() && sharedTargets.size() > groups.size()) {
+            device.getInterop()->beforeHostRead();
+            device.getCompositor().draw(sharedTargets[groups.size()]);
+        }
+        device.getInterop()->afterHostRead();
+        nativeFrameSubmitted = false;
     }
+    device.endGameFrame();
 
     if (debugText->isVisible())
         updateDebugText();
@@ -529,23 +656,29 @@ void Renderer::updateDebugText() {
 
     text += overdrawView.getDebugText();
 
-    if (!enabled) {
+    if (!active) {
+        text += "Bismuth is inactive for this level (see logs)\n";
+    } else if (!enabled) {
         text += "Bismuth renderer is disabled\n";
         text += "Press F8 to enable\n";
     } else {
         if (debugTextEnabled) {
+            auto& device = gfx::Device::get();
+            auto& host = device.getHost();
             auto screenSize = CCDirector::get()->getWinSizeInPixels();
 
             text += fmt::format("Bismuth renderer {}\n", Mod::get()->getVersion().toVString());
-            text += fmt::format("OpenGL {}\n", (const char*)glGetString(GL_VERSION));
-            text += fmt::format("{}\n", (const char*)glGetString(GL_RENDERER));
+            text += fmt::format("{}\n", device.describe());
+            text += fmt::format("Host GL: {}\n", host.version);
+            text += fmt::format("{}\n", host.renderer);
             text += fmt::format("Window: {}x{}\n", screenSize.width, screenSize.height);
-            text += fmt::format("GPU time: {}ms\n", (double)renderTime / 1000000.0);
+            text += fmt::format("GPU time: {:.3f}ms\n", device.getLastGpuTimeMs());
+            text += fmt::format("Layers: {} in {} group(s)\n", batchNodes.size(), groups.size());
             text += fmt::format("Vertex buffer size: {}\n", byteSizeToString(objectBatch.getVertexBufferSize()));
-            text += fmt::format("Sprites on screen: {}\n", spritesOnScreen);
-            text += fmt::format("Static rendering buffer size: {}\n", byteSizeToString(srbBuffer->getSize()));
-            text += fmt::format("Group state buffer size: {}\n", byteSizeToString(groupManager.getGroupStateBufferSize()));
-            text += fmt::format("Color channel buffer size: {}\n", byteSizeToString(sizeof(ColorChannelBuffer)));
+            if (batchRenderer.getCullingPath() == gfx::CullingPath::Cpu)
+                text += fmt::format("Visible triangles: {}\n", batchRenderer.getLastVisibleVertexCount() / 3);
+            text += fmt::format("Static buffers: {}\n", byteSizeToString(batchRenderer.getStaticBufferBytes()));
+            text += fmt::format("Frame buffer: {}\n", byteSizeToString(batchRenderer.getFrameBufferBytes()));
             text += "\n";
             text += BProfiler::toString();
             text += "\n";
@@ -557,13 +690,6 @@ void Renderer::updateDebugText() {
     debugText->setString(text.c_str());
     debugTextOutline1->setString(text.c_str());
     debugTextOutline2->setString(text.c_str());
-}
-
-void Renderer::bindCullingComputeShaderBuffers() {
-    gameStateBuffer->bindAsUniformBuffer(GAME_STATE_BUFFER_BINDING);
-    srbBuffer->bindAsStorageBuffer(OBJECT_INFO_BUFFER_BINDING);
-    colorChannelBufferObject->bindAsStorageBuffer(COLOR_CHANNEL_BUFFER_BINDING);
-    groupManager.bindGroupStateBuffers();
 }
 
 void Renderer::fetchBlendingStates() {
@@ -578,40 +704,16 @@ void Renderer::fetchBlendingStates() {
     colorChannelsIsBlending[COLOR_CHANNEL_LBG] = true;
 }
 
-Shader* Renderer::prepareDraw() {
-    PROFILER_PUSH("Renderer::prepareDraw");
-    // storeGLStates();
-    shader->use();
-    PROFILER_POP();
-    return shader.get();
-}
-
-void Renderer::finishDraw() {
-    // restoreGLStates();
-}
-
 void Renderer::update(float dt) {
     gameTimer += dt;
-    
-    float audioScale;
-    if (layer->m_skipAudioStep)
-        audioScale = FMODAudioEngine::sharedEngine()->getMeteringValue();
-    else
-        audioScale = layer->m_audioEffectsLayer->m_audioScale;
-    
-    if (layer->m_isSilent || (layer->m_isPracticeMode && !layer->m_practiceMusicSync))
-        audioScale = 0.5;
 
-    if (debugText->isVisible())
+    if (debugText && debugText->isVisible())
         updateDebugText();
-
-    auto& gstate = layer->m_gameState;
-    cameraCenterPos = ccPointToGLM(gstate.m_cameraPosition2 + CCPoint(layer->m_cameraWidth * 0.5, layer->m_cameraHeight * 0.5));
 }
 
 CCSpriteBatchNode* Renderer::getSpriteBatchNodeWithLayerId(LayerKey id) {
     CCNode* node = layer->parentForZLayer((i32)id.zlayer, id.blending, (i32)id.spriteSheet, false);
-    
+
     if (!node || layer->m_batchNodes->indexOfObject(node) == UINT_MAX)
         return nullptr;
 
@@ -625,7 +727,7 @@ Ref<Renderer> Renderer::create(PlayLayer* layer, CCArray* objects) {
         ren->autorelease();
         return ren;
     }
-    
+
     log::error("Failed to initialize renderer");
     delete ren;
     return nullptr;
@@ -636,57 +738,28 @@ Ref<Renderer> Renderer::get() {
 }
 
 bool Renderer::useOptimizations() {
-    if (canEnableDisableIngame())
+    if (!active || canEnableDisableIngame())
         return false;
 
     return true;
 }
 
 void Renderer::setEnabled(bool enabled) {
+    if (!active)
+        enabled = false;
+
     this->enabled = enabled;
     this->setVisible(enabled);
     for (auto node : batchNodes)
         node->setVisible(enabled);
     for (auto batch : CCArrayExt<CCNode*>(layer->m_batchNodes))
         batch->setVisible(!enabled);
-    updateDebugText();
+    if (debugText)
+        updateDebugText();
 }
 
 void Renderer::reset() {
     groupManager.resetGroupStates();
-}
-
-void Renderer::drawLine(const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) {
-    if (!basicShader)
-        basicShader = Shader::create("basic.vert", "basic.frag");
-    if (!basicShader)
-        return;
-
-    glm::vec2 data[2] = { p1, p2 };
-    auto buffer = Buffer::createStaticDraw("Line buffer", &data, sizeof(data));
-    if (!buffer) return;
-    buffer->bindAs(GL_ARRAY_BUFFER);
-
-    u32 vao;
-    glGenVertexArrays(1, &vao);
-    glBindVertexArray(vao);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), 0);
-    glEnableVertexAttribArray(0);
-
-    kmMat4 matrixP;
-	kmMat4 matrixMV;
-	kmMat4 matrixMVP;
-	kmGLGetMatrix(KM_GL_PROJECTION, &matrixP);
-	kmGLGetMatrix(KM_GL_MODELVIEW, &matrixMV);
-	kmMat4Multiply(&matrixMVP, &matrixP, &matrixMV);
-
-    basicShader->use();
-    basicShader->setMatrix4("u_mvp", matrixMVP.mat);
-    basicShader->setVec4("u_color", color);
-
-    glDrawArrays(GL_LINES, 0, 2);
-
-    glDeleteVertexArrays(1, &vao);
 }
 
 DECLARE_HOTKEY(KEY_F3, {
@@ -705,55 +778,5 @@ DECLARE_HOTKEY(KEY_F9, {
 })
 
 DECLARE_HOTKEY(KEY_F6, {
-    BProfiler::useAverages(!BProfiler::isUsingAverages()); 
+    BProfiler::useAverages(!BProfiler::isUsingAverages());
 });
-
-static i32 storedVAO, storedVBO, storedIBO, storedProgram;
-static i32 storedBlendSrcAlpha, storedBlendSrcRGB;
-static i32 storedBlendDstAlpha, storedBlendDstRGB;
-
-static i32 storedTextures[9];
-
-void storeGLStates() {
-    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &storedVAO);
-    /*
-    PROFILER_PUSH("storeGLStates");
-    // glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &storedVBO);
-    // glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &storedIBO);
-    glGetIntegerv(GL_CURRENT_PROGRAM, &storedProgram);
-    
-    // glGetIntegerv(GL_BLEND_SRC_ALPHA, &storedBlendSrcAlpha);
-    // glGetIntegerv(GL_BLEND_SRC_RGB,   &storedBlendSrcRGB);
-    // glGetIntegerv(GL_BLEND_DST_ALPHA, &storedBlendDstAlpha);
-    // glGetIntegerv(GL_BLEND_DST_RGB,   &storedBlendDstRGB);
-
-    for (int i = 0; i < 9; i++) {
-    }
-    glActiveTexture(GL_TEXTURE0);
-    glGetIntegerv(GL_TEXTURE_BINDING_2D, storedTextures);
-    glActiveTexture(GL_TEXTURE0);
-    PROFILER_POP();
-    */
-}
-
-void restoreGLStates() {
-    glBindVertexArray(storedVAO);
-    /*
-    PROFILER_PUSH("restoreGLStates");
-    // glBindBuffer(GL_ARRAY_BUFFER, storedVBO);
-    // glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, storedIBO);
-    glUseProgram(storedProgram);
-
-    glBlendFuncSeparate(
-        storedBlendSrcRGB,
-        storedBlendDstRGB,
-        storedBlendSrcAlpha,
-        storedBlendDstAlpha
-    );
-    
-    glActiveTexture(GL_TEXTURE0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, *storedTextures);
-    PROFILER_POP();
-    */
-}

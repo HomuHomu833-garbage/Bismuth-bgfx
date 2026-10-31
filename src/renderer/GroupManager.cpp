@@ -137,8 +137,7 @@ void GroupManager::initWithObjects(cocos2d::CCArray* objects) {
     alphaValuesPerGroupId.resize(maxGroupId + 1);
     alphaValuesPerAlphaIndex.resize(alphaIndiciesCount);
 
-    groupStateBuffer = Buffer::createDynamicDraw("GroupStateBuffer", getGroupStateBufferSize());
-    groupStates = (GroupCombinationState*)groupStateBuffer->mapReadWrite();
+    groupStates.resize(groupCombinationCount);
 
     isGroupToggledOn.resize(maxGroupId + 1, true);
 
@@ -196,13 +195,12 @@ void GroupManager::updateGroupStateBuffer() {
 
     updatePulseEntries();
 
-    groupStateBuffer->flush(0, groupStateBuffer->getSize());
     PROFILER_POP();
 }
 
 void GroupManager::storeGroupStates(StoredGroupStates& storage) {
     storage.groupStates.resize(groupCombinationCount);
-    std::memcpy(storage.groupStates.data(), groupStates, getGroupStateBufferSize());
+    std::memcpy(storage.groupStates.data(), groupStates.data(), getGroupStateBufferSize());
 
     storage.isGroupToggledOn.resize(isGroupToggledOn.size());
     std::copy(isGroupToggledOn.begin(), isGroupToggledOn.end(), storage.isGroupToggledOn.begin());
@@ -210,7 +208,7 @@ void GroupManager::storeGroupStates(StoredGroupStates& storage) {
 
 void GroupManager::restoreGroupStates(StoredGroupStates& storage) {
     usize numToCopy = std::min<usize>(storage.groupStates.size(), groupCombinationCount);
-    std::memcpy(groupStates, storage.groupStates.data(), numToCopy * sizeof(GroupCombinationState));
+    std::memcpy(groupStates.data(), storage.groupStates.data(), numToCopy * sizeof(GroupCombinationState));
 
     std::copy(storage.isGroupToggledOn.begin(), storage.isGroupToggledOn.end(), isGroupToggledOn.begin());
 }
@@ -408,26 +406,24 @@ void GroupManager::updatePulseEntries() {
         groupStates[groupCombIndex].pulseIndex = pulseIndex;
     }
 
-    // log::info("Pulse entry count: {}", pulseEntries.size());
-
-    pulseEntryBufferEnsureSize(pulseEntries.size() * sizeof(PulseEntry));
-    pulseEntryBuffer->write(std::span<PulseEntry>(pulseEntries));
-    pulseEntryBuffer->flush(0, pulseEntries.size() * sizeof(PulseEntry));
+    this->pulseEntries.resize(pulseEntries.size() * 2);
+    std::memcpy(this->pulseEntries.data(), pulseEntries.data(), pulseEntries.size() * sizeof(PulseEntry));
 
     PROFILER_POP();
 }
 
-#define PULSE_ENTRY_BUFFER_SIZE_STEP 32 * 1024
+void GroupManager::writeFrameData(bismuth::FrameBatchData& frame) {
+    using bismuth::UVec4;
 
-void GroupManager::pulseEntryBufferEnsureSize(usize size) {
-    if (pulseEntryBuffer && pulseEntryBuffer->getSize() >= size)
-        return;
+    frame.groupStateOffset = (u32)frame.buffer.size();
+    usize groupElements = groupStates.size() * GROUP_STATE_STRIDE;
+    frame.buffer.resize(frame.buffer.size() + groupElements);
+    std::memcpy(&frame.buffer[frame.groupStateOffset], groupStates.data(), groupElements * sizeof(UVec4));
 
-    pulseEntryBuffer = nullptr;
-
-    usize newSize = (size / PULSE_ENTRY_BUFFER_SIZE_STEP + 1) * PULSE_ENTRY_BUFFER_SIZE_STEP;
-
-    log::info("Resized PulseEntryBuffer to {}", byteSizeToString(newSize));
-
-    pulseEntryBuffer = Buffer::createDynamicDraw("PulseEntryBuffer", newSize);
+    // Two (flags, colorOrHSV) entries per uvec4; always end with an end marker.
+    frame.pulseOffset = (u32)frame.buffer.size();
+    usize pulseElements = (pulseEntries.size() + 3) / 4 + 1;
+    frame.buffer.resize(frame.buffer.size() + pulseElements, UVec4(0));
+    if (!pulseEntries.empty())
+        std::memcpy(&frame.buffer[frame.pulseOffset], pulseEntries.data(), pulseEntries.size() * sizeof(u32));
 }

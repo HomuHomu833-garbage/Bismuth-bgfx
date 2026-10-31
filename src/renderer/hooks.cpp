@@ -4,6 +4,7 @@
 #include <decomp/GJBaseGameLayer.hpp>
 #include <BProfiler.hpp>
 #include "../cl.hpp"
+#include <gfx/Device.hpp>
 
 using namespace geode::prelude;
 
@@ -314,30 +315,22 @@ static bool hasAlreadyDoneMenuLoad = false;
 class OnMenuLoad : public CCNode {
 public:
     void showLoadAlerts() {
-        if (!isOpenGLAtLeastVersion(4, 3)) {
-            std::string version = (const char*)glGetString(GL_VERSION);
-            std::transform(version.begin(), version.end(), version.begin(), [](char ch) { return std::tolower(ch); });
+        if (!Mod::get()->getSettingValue<bool>("enabled"))
+            return;
 
-            if (version.find("reviangle") != std::string::npos) {
-                FLAlertLayer::create(
-                    "Bismuth error!",
-                    "You are using ReviANGLE which does not supply the required OpenGL version 4.3\n"
-                    "Disable ReviANGLE and try again.",
-                    "Ok"
-                )->show();
-                return;
-            }
-
+        std::string report;
+        if (!ensureBismuthDevice(report)) {
             FLAlertLayer::create(
                 "Bismuth error!",
-                "Your GPU does not support the required OpenGL 4.3!\n"
-                "Make sure your GPU drivers are updated.",
+                ("Bismuth couldn't start any renderer on this device, levels will render normally.\n\n" + report).c_str(),
                 "Ok"
             )->show();
             return;
         }
 
-        if (getGPUCoreCount() == -1) {
+        auto& device = bismuth::gfx::Device::get();
+        if (device.getCullingPath() == bismuth::gfx::CullingPath::Gpu && getGPUCoreCount() == -1) {
+#ifdef GEODE_IS_WINDOWS
             FLAlertLayer::create(
                 "No core count!",
                 "Bismuth could not find the core count of your GPU!\n"
@@ -345,6 +338,7 @@ public:
                 "Make sure you search up your *GPU* core count, go to Bismuth settings, and set it there.\n",
                 "Ok"
             )->show();
+#endif
         }
     }
 

@@ -1,28 +1,27 @@
+#pragma once
+
 #include <common.hpp>
-#include "Buffer.hpp"
-#include "Shader.hpp"
+#include <gfx/HostGL.hpp>
 
 class Renderer;
 
+/*
+    Debug view (F9): renders the scene once with vanilla rendering and once with
+    Bismuth, and shows the amplified difference. Uses cocos2d render textures and
+    a small GL program, so it works with every Bismuth backend.
+*/
 class DifferenceMode {
 public:
     ~DifferenceMode();
     inline DifferenceMode(Renderer& renderer)
         : renderer(renderer) {}
 
-    /*
-    void drawSceneHook1();
-    void drawSceneHook2();
-    void drawSceneHook3();
-    void drawSceneHook4();
-    */
-
     void drawSceneHook();
 
 private:
-    void prepare(u32 width, u32 height);
+    bool prepare(u32 width, u32 height);
 
-    void destroyFramebuffers();
+    void destroy();
 
 private:
     Renderer& renderer;
@@ -32,15 +31,10 @@ private:
 
     cocos2d::CCSize lastSize = { -1.0, -1.0 };
 
-    i32 prevFramebuffer;
-    bool rendererPrevEnabled;
-    bool prevPaused;
+    Ref<cocos2d::CCRenderTexture> vanillaTexture;
+    Ref<cocos2d::CCRenderTexture> bismuthTexture;
 
-    u32 vanillaTexture = 0;
-    u32 vanillaFramebuffer = 0;
-
-    u32 bismuthTexture = 0;
-    u32 bismuthFramebuffer = 0;
-
-    UPtr<Shader> shader = nullptr;
+    bismuth::gfx::GLuint program = 0;
+    bismuth::gfx::GLuint quad = 0;
+    bismuth::gfx::GLint locVanilla = -1, locBismuth = -1, locIntensity = -1, locBackdrop = -1;
 };

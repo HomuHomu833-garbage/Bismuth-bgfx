@@ -68,6 +68,9 @@ public:
     /// targets to GL.
     void submitNative();
 
+    /// Number returned by the last bgfx::frame().
+    u32 getLastFrameNumber() const { return lastFrameNumber; }
+
     /// GPU time (ms) of the bgfx frames submitted during the last game frame.
     double getLastGpuTimeMs() const { return lastGpuTimeMs; }
     void endGameFrame();
@@ -88,6 +91,7 @@ private:
     Compositor compositor;
     bool hostLost = false;
 
+    u32 lastFrameNumber = 0;
     double frameGpuTimeMs = 0.0;
     double lastGpuTimeMs = 0.0;
     std::string cullingReason;

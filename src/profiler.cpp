@@ -7,6 +7,7 @@
 #include "HotKey.hpp"
 #include "utils/GPUTimer.hpp"
 #include "renderer/Renderer.hpp"
+#include <gfx/Device.hpp>
 
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/CCDisplayLinkDirector.hpp>
@@ -44,8 +45,6 @@ class $modify(MyCCDisplayLinkDirector, cocos2d::CCDisplayLinkDirector) {
             profiler::isTakingGPUTime = false;//Renderer::get() != nullptr;
             takeSnapshotNextFrame = false;
             timeSpentInFunction.clear();
-            if (!profiler::isTakingGPUTime)
-                glBeginQuery(GL_TIME_ELAPSED, 50);
             processTime = getTime();
         }
 
@@ -56,11 +55,8 @@ class $modify(MyCCDisplayLinkDirector, cocos2d::CCDisplayLinkDirector) {
 
             processTime = getTime() - processTime;
 
-            i64 gpuTime = 0;
-            if (!profiler::isTakingGPUTime) {
-                glEndQuery(GL_TIME_ELAPSED);
-                glGetQueryObjecti64v(50, GL_QUERY_RESULT, &gpuTime);
-            }
+            // bgfx measures GPU time per submitted frame (a few frames late).
+            double gpuTimeMs = bismuth::gfx::Device::get().getLastGpuTimeMs();
             profiler::isTakingGPUTime = false;
 
             std::vector<std::pair<void*, i64>> functionsTime;
@@ -84,7 +80,7 @@ class $modify(MyCCDisplayLinkDirector, cocos2d::CCDisplayLinkDirector) {
 
             log::info("Functions time sum: {}ms", (double)functionSumTime / 1000000.0);
             log::info("CPU time: {}ms", (double)processTime / 1000000.0);
-            log::info("Total GPU time: {}ms", (double)gpuTime / 1000000.0);
+            log::info("Bismuth GPU time: {}ms", gpuTimeMs);
 
             for (auto timer : gpuTimers) {
                 log::info("{}: {}ms", timer->getName(), (double)timer->getTime() / 1000000.0);

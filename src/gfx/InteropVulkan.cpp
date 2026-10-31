@@ -419,9 +419,9 @@ int32_t InteropVulkan::allocateTargetMemory(TargetData& data, VkImage image, VkD
 
 #if defined(__ANDROID__)
     VkAndroidHardwareBufferPropertiesANDROID props { VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID };
-    VkResult result = fns.getAndroidHardwareBufferProperties(device, data.hardwareBuffer, &props);
-    if (result != VK_SUCCESS)
-        return result;
+    VkResult propsResult = fns.getAndroidHardwareBufferProperties(device, data.hardwareBuffer, &props);
+    if (propsResult != VK_SUCCESS)
+        return propsResult;
 
     VkImportAndroidHardwareBufferInfoANDROID importInfo { VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID };
     importInfo.buffer = data.hardwareBuffer;

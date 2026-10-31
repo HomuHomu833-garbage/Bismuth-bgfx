@@ -6,18 +6,42 @@
 #include "ObjectBatch.hpp"
 #include "ObjectUtils.hpp"
 #include "OverdrawView.hpp"
-#include "Shader.hpp"
-#include <unordered_map>
 #include <array>
+#include <unordered_map>
+#include <unordered_set>
 
+#include "BatchRenderer.hpp"
 #include "DifferenceMode.hpp"
 #include "GroupManager.hpp"
 #include "ObjectBatchNode.hpp"
-#include "SAOBuffer.hpp"
+#include <gfx/Device.hpp>
+#include <gfx/HostTextures.hpp>
 
 using namespace geode;
 
 u32 convertToShaderHSV(const cocos2d::ccHSVValue& hsv);
+
+/// Initializes (or re-initializes after a settings change / context loss) the
+/// bgfx device. Must be called on the GL thread. `report` lists failed backends.
+bool ensureBismuthDevice(std::string& report);
+
+/// bgfx views used by the renderer (lower ids are rendered first).
+namespace RendererViews {
+    constexpr bgfx::ViewId Compute     = 0;
+    constexpr bgfx::ViewId HostDraw    = 1;
+    constexpr bgfx::ViewId OverdrawCount = 2;
+    constexpr bgfx::ViewId GroupFirst  = 3;   // one per composite group (native backends)
+    constexpr u32          MaxGroups   = 24;
+    constexpr bgfx::ViewId Overlay     = GroupFirst + MaxGroups;
+}
+
+/*
+    A run of Bismuth layers with no other cocos2d node drawn in between: they can
+    be rendered together and, with Vulkan/Metal, composited as one texture.
+*/
+struct CompositeGroup {
+    std::vector<ObjectBatchNode*> nodes;
+};
 
 class Renderer : public cocos2d::CCNode {
 private:
@@ -32,11 +56,11 @@ private:
 
     void terminate();
 
-    void prepareShaderUniforms();
+    void prepareGameState();
 
-    void prepareColorChannelBuffer();
+    void prepareColorChannels();
 
-    void generateStaticRenderingBuffer(std::vector<GameObject*>& objects);
+    void generateStaticRenderingBuffer(std::vector<GameObject*>& objects, bismuth::StaticBatchData& out);
 
     void draw() override;
 
@@ -44,23 +68,28 @@ private:
 
     void updateDebugText();
 
-    void bindCullingComputeShaderBuffers();
-
     void fetchBlendingStates();
+
+    void computeCompositeGroups();
+
+    bool ensureSharedTargets(u32 count, u32 width, u32 height);
+
+    void drawGroupLayers(const CompositeGroup& group, bgfx::ViewId view, bool toSharedTarget);
+
+    /// Stops rendering with Bismuth for the rest of the level (vanilla rendering takes over).
+    void deactivate(const char* reason);
 
     friend class FinishNode;
     friend class ObjectBatch;
-
-protected:
-    Shader* prepareDraw();
-
-    void finishDraw();
-
-    friend class GroupManager;
     friend class ObjectBatchNode;
+    friend class GroupManager;
+    friend class OverdrawView;
 
 public:
     void update(float dt) override;
+
+    /// Called by every ObjectBatchNode at its place in the draw order.
+    void drawLayerNode(ObjectBatchNode* node);
 
     cocos2d::CCSpriteBatchNode* getSpriteBatchNodeWithLayerId(LayerKey id);
 
@@ -74,6 +103,12 @@ public:
         return spriteSheets[(i32)sheet];
     }
 
+    inline bgfx::TextureHandle getSpriteSheetHandle(SpriteSheet sheet) {
+        if ((i32)sheet < 0 || (i32)sheet >= (i32)SpriteSheet::COUNT)
+            return BGFX_INVALID_HANDLE;
+        return spriteSheetHandles[(i32)sheet];
+    }
+
     inline PlayLayer* getPlayLayer() {
         return layer;
     }
@@ -83,6 +118,9 @@ public:
     }
 
     inline bool isEnabled() { return enabled; }
+
+    /// False once Bismuth gave up for this level (e.g. the GL context was lost).
+    inline bool isActive() { return active; }
 
     inline DifferenceMode* getDifferenceMode() {
         if (!differenceModeEnabled) return nullptr;
@@ -106,9 +144,7 @@ public:
 
     inline ObjectBatch& getObjectBatch() { return objectBatch; }
 
-    inline Shader* getCullingComputeShader() const {
-        return cullingComputeShader.get();
-    }
+    inline bismuth::BatchRenderer& getBatchRenderer() { return batchRenderer; }
 
     bool useOptimizations();
 
@@ -117,10 +153,15 @@ public:
     inline GroupManager& getGroupManager() { return groupManager; }
 
     inline const ColorChannelBlendStates& getColorChannelBlendStates() { return colorChannelsIsBlending; }
-    
+
+    inline OverdrawView& getOverdrawView() { return overdrawView; }
+
     void reset();
 
-    void drawLine(const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color);
+    /// The composite group `node` belongs to this frame, or -1.
+    i32 getGroupOfNode(ObjectBatchNode* node) const;
+
+    static bismuth::LayerBlend blendForLayer(const LayerKey& key);
 
 public:
     static Ref<Renderer> create(PlayLayer* layer, cocos2d::CCArray* objects);
@@ -135,22 +176,22 @@ private:
     PlayLayer* layer;
 
     bool enabled = false;
+    bool active = false;
     bool debugTextEnabled = false;
     bool ingameEnableDisable = false;
+    bool hasCulledOnce = false;
+    bismuth::SortedBatchData* lastSortedBatch = nullptr;
 
     u64 rendererStartTime = 0;
 
-    usize spritesOnScreen = 0;
-
     std::unordered_map<GameObject*, usize> objectSRBIndicies;
 
-    u32 timeElapsedQuery = 0;
-
-    glm::vec2 cameraCenterPos;
-
     std::vector<ObjectBatchNode*> batchNodes;
+    std::unordered_set<cocos2d::CCNode*> ownNodes;
 
     cocos2d::CCTexture2D* spriteSheets[(i32)SpriteSheet::COUNT] = { nullptr };
+    bgfx::TextureHandle spriteSheetHandles[(i32)SpriteSheet::COUNT];
+    bismuth::gfx::HostTextures hostTextures;
 
     ColorChannelBlendStates colorChannelsIsBlending;
 
@@ -163,17 +204,18 @@ private:
     GroupManager groupManager;
 
     ObjectBatch objectBatch;
-    UPtr<Shader> shader = nullptr;
-    UPtr<Shader> basicShader = nullptr;
-    UPtr<Shader> cullingComputeShader = nullptr;
+    bismuth::BatchRenderer batchRenderer;
 
-    ColorChannelBuffer* colorChannelBuffer;
-    UPtr<Buffer> colorChannelBufferObject = nullptr;
+    bismuth::FrameBatchData frameData;
+    bismuth::GameStateUniforms gameState;
 
-    UPtr<Buffer> srbBuffer = nullptr;
-
-    GameStateBuffer gameState;
-    UPtr<Buffer> gameStateBuffer = nullptr;
+    //// COMPOSITE GROUPS ////
+    std::vector<CompositeGroup> groups;
+    std::unordered_map<ObjectBatchNode*, i32> groupOfNode;
+    std::vector<bismuth::gfx::SharedTarget> sharedTargets;
+    u32 sharedTargetWidth = 0;
+    u32 sharedTargetHeight = 0;
+    bool nativeFrameSubmitted = false;
 
     bool differenceModeEnabled = false;
     DifferenceMode differenceMode;
@@ -181,11 +223,5 @@ private:
 
     float gameTimer = 0.0;
 
-    i64 groupStateCount;
     i64 renderedGameObjectCount;
-    i64 renderTime;
 };
-
-void storeGLStates();
-
-void restoreGLStates();

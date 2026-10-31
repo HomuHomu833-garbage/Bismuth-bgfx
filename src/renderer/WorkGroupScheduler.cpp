@@ -1,64 +1,14 @@
 #include "WorkGroupScheduler.hpp"
 #include "Renderer.hpp"
-#include "../cl.hpp"
 
-void SortedObjectBatch::bindBuffers() {
-    if (!haveBuffersBeenCreated) {
-        spriteRemapBuffer = Buffer::createStaticDraw(
-            "SpriteRemapBuffer",
-            inputSpriteIndicies.data(),
-            inputSpriteIndicies.size() * sizeof(u32)
-        );
+#include <algorithm>
 
-        if (!spriteRemapBuffer)
-            return;
-
-        workGroupBuffer = Buffer::createStaticDraw(
-            "WorkGroupBuffer",
-            workGroups.data(),
-            workGroups.size() * sizeof(WorkGroup)
-        );
-
-        if (!workGroupBuffer)
-            return;
-
-        drawCommandBuffer = Buffer::createGPUExclusive(
-            "DrawCommandBuffer",
-            workGroups.size() * sizeof(DrawCommand)
-        );
-
-        if (!drawCommandBuffer)
-            return; // FIXME: Make sure that this shows an error and exits the level
-
-        drawCommandBuffer->write(drawCommands.data(), drawCommandBuffer->getSize());
-
-        preCulledSpritesBuffer->flushAllAndUnmap();
-
-        inputSpriteIndicies.clear();
-        workGroups.clear();
-        drawCommands.clear();
-        haveBuffersBeenCreated = true;
-    }
-
-    spriteRemapBuffer->bindAsStorageBuffer(SPRITE_REMAP_BUFFER_BINDING);
-    workGroupBuffer->bindAsStorageBuffer(WORK_GROUP_BUFFER_BINDING);
-    drawCommandBuffer->bindAsStorageBuffer(DRAW_COMMAND_BUFFER_BINDING);
-    preCulledSpritesBuffer->bind();
-}
-
-WorkGroupScheduler::WorkGroupScheduler() {
-    if (maxWorkGroupCount == -1) {
-        maxWorkGroupCount = getGPUCoreCount();
-        if (maxWorkGroupCount == -1)
-            maxWorkGroupCount = 8000; // dummy value
-        else
-            maxWorkGroupCount = (double)maxWorkGroupCount * WORK_GROUPS_PER_GPU_CORES;
-    }
-}
+using namespace geode::prelude;
 
 WorkGroupScheduler::~WorkGroupScheduler() {
-    if (thread.joinable())
-        thread.join();
+    waitForJobs();
+    std::scoped_lock lock(mutex);
+    currentGenerationJobs.clear();
 }
 
 void WorkGroupScheduler::addSprite(
@@ -76,37 +26,52 @@ void WorkGroupScheduler::addSprite(
         .inputSpriteIndex = inputSpriteIndex,
         .triCount = triCount,
         .groupCombinationIndex = Renderer::get()->getGroupManager().getGroupCombinationIndexForObject(object),
-        .object = object
+        .startPosition = ccPointToGLM(object->m_startPosition)
     });
 }
 
 SortedObjectBatch* WorkGroupScheduler::fetchSortedBatchForBlendStates(const ColorChannelBlendStates& blendStates) {
     cleanUpFinishedJobs();
-    
+
     {
         std::scoped_lock lock(mutex);
-        if (sortedBatchesPerBlendStates.contains(blendStates))
-            return sortedBatchesPerBlendStates[blendStates].get();
+        auto it = sortedBatchesPerBlendStates.find(blendStates);
+        if (it != sortedBatchesPerBlendStates.end())
+            return it->second.get();
     }
 
     addGenerationJob(blendStates);
     return nullptr;
 }
 
-void WorkGroupScheduler::cleanUpFinishedJobs() {
+std::vector<SortedObjectBatch*> WorkGroupScheduler::allBatches() {
     std::scoped_lock lock(mutex);
+    std::vector<SortedObjectBatch*> batches;
+    for (auto& [_, batch] : sortedBatchesPerBlendStates)
+        batches.push_back(batch.get());
+    return batches;
+}
 
-    while (!finishedGenerationJobs.empty()) {
-        GenerationJob* job = *finishedGenerationJobs.begin();
-        finishedGenerationJobs.erase(job);
+void WorkGroupScheduler::cleanUpFinishedJobs() {
+    std::vector<UPtr<GenerationJob>> finished;
+    {
+        std::scoped_lock lock(mutex);
 
-        for (auto it = currentGenerationJobs.begin(); it != currentGenerationJobs.end(); it++) {
-            if (it->second.get() == job) {
-                currentGenerationJobs.erase(it);
-                break;
+        while (!finishedGenerationJobs.empty()) {
+            GenerationJob* job = *finishedGenerationJobs.begin();
+            finishedGenerationJobs.erase(job);
+
+            for (auto it = currentGenerationJobs.begin(); it != currentGenerationJobs.end(); it++) {
+                if (it->second.get() == job) {
+                    finished.push_back(std::move(it->second));
+                    currentGenerationJobs.erase(it);
+                    break;
+                }
             }
         }
     }
+    // Joined outside the lock (the thread may still be releasing it).
+    finished.clear();
 }
 
 void WorkGroupScheduler::addGenerationJob(const ColorChannelBlendStates& blendStates) {
@@ -117,8 +82,7 @@ void WorkGroupScheduler::addGenerationJob(const ColorChannelBlendStates& blendSt
     auto job = std::make_unique<GenerationJob>(*this);
 
     job->blendStates = blendStates;
-    job->preCulledSprites = PreCulledSprite::Buffer::create(spriteEntries.size(), GL_STATIC_DRAW);
-    job->maxWorkGroupCount = maxWorkGroupCount;
+    job->maxWorkGroupCount = std::clamp<isize>(maxWorkGroupCount, 1, 65535);
 
     job->thread = std::thread(&GenerationJob::generateSortedBatchForBlendStates, job.get());
 
@@ -130,6 +94,9 @@ LayerKey WorkGroupScheduler::SpriteEntry::getFullLayerKey(const ColorChannelBlen
 }
 
 void WorkGroupScheduler::GenerationJob::generateSortedBatchForBlendStates() {
+    using bismuth::UVec4;
+    using bismuth::floatBits;
+
     usize spriteCount;
     {
         std::scoped_lock lock(scheduler.mutex);
@@ -137,59 +104,60 @@ void WorkGroupScheduler::GenerationJob::generateSortedBatchForBlendStates() {
         loadAndSortSprites(scheduler.spriteEntries);
     }
 
-    inputSpriteIndicies.clear();
-    inputSpriteIndicies.reserve(spriteCount);
-
-    u32 approxWorkGroupCount = std::min<u32>(spriteCount, maxWorkGroupCount);
-    u32 approxSpritesPerWorkGroup = spriteCount / approxWorkGroupCount;
-
-    workGroups.clear();
-    workGroups.reserve(approxWorkGroupCount + 100);
-
-    currentSpriteIndex = 0;
-
-    u32 outIndex = 0;
-    std::map<LayerKey, WorkGroupRange> workGroupRangePerLayerKey;
-
-    for (auto& [key, layer] : sortedSpriteLayers) {
-        // log::info("Process layer: {}", key.toString());
-        u32 workGroupStartIndex = workGroups.size();
-        generateWorkGroupsForLayer(key, approxSpritesPerWorkGroup, outIndex);
-        u32 workGroupEndIndex = workGroups.size();
-
-        workGroupRangePerLayerKey[key] = {
-            .offset = workGroupStartIndex,
-            .count  = workGroupEndIndex - workGroupStartIndex
-        };
-
-        // log::info("Layer processed {}: (index={}, size={})", key.toString(), workGroupStartIndex, workGroupEndIndex - workGroupStartIndex);
-    }
-
-    std::vector<DrawCommand> drawCommands;
-    drawCommands.resize(workGroups.size());
-
-    for (usize i = 0; i < workGroups.size(); i++) {
-        drawCommands[i].baseInstance  = 0;
-        drawCommands[i].instanceCount = 1;
-        drawCommands[i].first = workGroups[i].culledIndexBufferOutputIndex * 3;
-    }
-
-    usize totalSize = inputSpriteIndicies.size() * sizeof(u32) +
-                      workGroups.size() * sizeof(WorkGroup) +
-                      drawCommands.size() * sizeof(DrawCommand) +
-                      preCulledSprites->getByteSize();
-
-    log::info("Generated SortedObjectBatch: workGroupCount={}, vramUsage={}", workGroups.size(), byteSizeToString(totalSize));
+    u32 approxWorkGroupCount = std::max<u32>(std::min<u32>((u32)spriteCount, (u32)maxWorkGroupCount), 1);
+    u32 spritesPerWorkGroup = std::max<u32>((u32)spriteCount / approxWorkGroupCount, 1);
 
     auto sortedBatch = std::make_unique<SortedObjectBatch>();
+    auto& data = sortedBatch->data;
 
-    sortedBatch->workGroupCount = (u32)workGroups.size();
-    sortedBatch->workGroupRangePerLayerKey = std::move(workGroupRangePerLayerKey);
-    sortedBatch->haveBuffersBeenCreated = false; // Buffers can only be created on the main thread!
-    sortedBatch->inputSpriteIndicies = std::move(inputSpriteIndicies);
-    sortedBatch->workGroups = std::move(workGroups);
-    sortedBatch->drawCommands = std::move(drawCommands);
-    sortedBatch->preCulledSpritesBuffer = std::move(preCulledSprites);
+    std::vector<UVec4> sorted;
+    std::vector<UVec4> workGroups;
+    std::vector<UVec4> layers;
+    sorted.reserve(spriteCount);
+    workGroups.reserve(approxWorkGroupCount + sortedSpriteLayers.size());
+
+    u32 outputTriangle = 0;
+
+    for (auto& [key, sprites] : sortedSpriteLayers) {
+        u32 layerIndex = (u32)layers.size();
+        u32 firstWorkGroup = (u32)workGroups.size();
+        u32 layerOutput = outputTriangle;
+
+        usize i = 0;
+        while (i < sprites.size()) {
+            u32 begin = (u32)sorted.size();
+            u32 workGroupOutput = outputTriangle;
+
+            for (u32 n = 0; n < spritesPerWorkGroup && i < sprites.size(); n++, i++) {
+                const SpriteEntry* sprite = sprites[i];
+                sorted.push_back(UVec4(
+                    floatBits(sprite->startPosition.x),
+                    floatBits(sprite->startPosition.y),
+                    sprite->groupCombinationIndex,
+                    sprite->inputSpriteIndex
+                ));
+                outputTriangle += sprite->triCount;
+            }
+
+            workGroups.push_back(UVec4(begin, (u32)sorted.size(), workGroupOutput, layerIndex));
+        }
+
+        layers.push_back(UVec4(firstWorkGroup, (u32)workGroups.size() - firstWorkGroup, layerOutput, 0));
+        sortedBatch->layerIndexPerKey[key] = { layerIndex, (u32)sprites.size() };
+    }
+
+    data.buffer = std::move(sorted);
+    data.workGroupOffset = (u32)data.buffer.size();
+    data.workGroupCount = (u32)workGroups.size();
+    data.buffer.insert(data.buffer.end(), workGroups.begin(), workGroups.end());
+    data.layerOffset = (u32)data.buffer.size();
+    data.layerCount = (u32)layers.size();
+    data.buffer.insert(data.buffer.end(), layers.begin(), layers.end());
+
+    log::info(
+        "Generated SortedObjectBatch: layers={}, workGroups={}, size={}",
+        data.layerCount, data.workGroupCount, byteSizeToString(data.buffer.size() * sizeof(UVec4))
+    );
 
     {
         std::scoped_lock lock(scheduler.mutex);
@@ -208,49 +176,8 @@ void WorkGroupScheduler::GenerationJob::loadAndSortSprites(const std::vector<Spr
     }
 
     for (auto& [key, layer] : sortedSpriteLayers) {
-        std::sort(layer.begin(), layer.end(), [](const SpriteEntry* a, const SpriteEntry* b) {
+        std::stable_sort(layer.begin(), layer.end(), [](const SpriteEntry* a, const SpriteEntry* b) {
             return a->zOrder < b->zOrder;
-        });
-    }
-}
-
-void WorkGroupScheduler::GenerationJob::generateWorkGroupsForLayer(
-    LayerKey layerKey,
-    u32 spritesPerWorkGroup,
-    u32& culledIndexBufferOutputIndex
-) {
-    assert(spritesPerWorkGroup > 0);
-
-    const auto& sprites = sortedSpriteLayers[layerKey];
-
-    u32 i = 0;
-    while (i < sprites.size()) {
-        u32 spritesToAdd = spritesPerWorkGroup;
-
-        u32 culledOutputIndex = culledIndexBufferOutputIndex;
-        u32 startIndex = inputSpriteIndicies.size();
-
-        while (spritesToAdd > 0 && i < sprites.size()) {
-            auto sprite = sprites[i];
-            inputSpriteIndicies.push_back(sprite->inputSpriteIndex);
-            culledIndexBufferOutputIndex += sprite->triCount;
-
-            (*preCulledSprites)[currentSpriteIndex].groupCombinationIndex = sprite->groupCombinationIndex;
-            (*preCulledSprites)[currentSpriteIndex].startPosition = ccPointToGLM(sprite->object->m_startPosition);
-
-            currentSpriteIndex++;
-            spritesToAdd--;
-            i++;
-        }
-
-        u32 endIndex = inputSpriteIndicies.size();
-
-        // log::info("  - Work group {} = (index={}, count={}), {}", workGroups.size(), startIndex, endIndex - startIndex, culledOutputIndex);
-
-        workGroups.push_back({
-            .inputSpriteStart = startIndex,
-            .inputSpriteEnd   = endIndex,
-            .culledIndexBufferOutputIndex = culledOutputIndex
         });
     }
 }

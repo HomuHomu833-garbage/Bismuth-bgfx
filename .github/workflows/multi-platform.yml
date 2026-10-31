@@ -15,20 +15,20 @@ jobs:
         - name: Windows
           os: windows-latest
 
-#        - name: macOS
-#          os: macos-latest
-#
-#        - name: iOS
-#          os: macos-latest
-#          target: iOS
-#
-#        - name: Android32
-#          os: ubuntu-latest
-#          target: Android32
-#
-#        - name: Android64
-#          os: ubuntu-latest
-#          target: Android64
+        - name: macOS
+          os: macos-latest
+
+        - name: iOS
+          os: macos-latest
+          target: iOS
+
+        - name: Android32
+          os: ubuntu-latest
+          target: Android32
+
+        - name: Android64
+          os: ubuntu-latest
+          target: Android64
 
     name: ${{ matrix.config.name }}
     runs-on: ${{ matrix.config.os }}
@@ -41,6 +41,41 @@ jobs:
         with:
           combine: true
           target: ${{ matrix.config.target }}
+
+  # Rendering core tests on Mesa (llvmpipe OpenGL + lavapipe Vulkan): every
+  # backend / culling combination must render the same image. Also checks that
+  # the committed shader binaries match shaders/*.sc.
+  core-tests:
+    name: Rendering core tests
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build libgl-dev libegl-dev libx11-dev \
+            mesa-vulkan-drivers libgl1-mesa-dri xvfb
+
+      - name: Cache shaderc
+        uses: actions/cache@v4
+        with:
+          path: build-shaderc
+          key: shaderc-${{ hashFiles('tools/build_shaderc.sh') }}
+
+      - name: Check generated shaders
+        run: tools/build_shaderc.sh --check
+
+      - name: Build tests
+        run: |
+          cmake -S tests -B build-tests -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build-tests
+
+      - name: Run tests
+        run: |
+          ./build-tests/bismuth_kernel_test
+          xvfb-run -a ./build-tests/bismuth_render_test
 
   package:
     name: Package builds

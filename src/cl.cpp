@@ -2,6 +2,16 @@
 
 using namespace geode::prelude;
 
+/*
+    GPU core count, used to size the GPU culling work groups.
+
+    On Windows it's queried through OpenCL for the device behind Geometry Dash's
+    OpenGL context (the Vulkan device is matched to the same GPU). Elsewhere
+    there's no reliable query, so the user setting or a default is used.
+*/
+
+#if defined(GEODE_IS_WINDOWS)
+
 #define CL_NO_CORE_PROTOTYPES
 #define CL_TARGET_OPENCL_VERSION 310
 #include <CL/cl_icd.h>
@@ -105,7 +115,7 @@ bool fetchGPUCoreCountRaw(cl_device_id deviceID) {
     }
 
     if (isIntelGPU())
-        gpuCoreCount *= 2; // TODO: Check if this is a stupid thing to do
+        coreCount *= 2; // TODO: Check if this is a stupid thing to do
 
     log::info("Detected core count: {}", coreCount);
 
@@ -179,6 +189,11 @@ isize getGPUCoreCount() {
     return gpuCoreCount;
 }
 
-$on_mod(Loaded) {
-    getGPUCoreCount();
+#else
+
+isize getGPUCoreCount() {
+    int setting = Mod::get()->getSettingValue<int>("gpu_core_count");
+    return setting != 0 ? setting : -1;
 }
+
+#endif

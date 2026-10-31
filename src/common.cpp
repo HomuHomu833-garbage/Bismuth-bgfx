@@ -1,6 +1,5 @@
 #include "common.hpp"
-#include "Geode/cocos/CCDirector.h"
-#include "renderer/Buffer.hpp"
+#include <gfx/Device.hpp>
 
 using namespace geode::prelude;
 
@@ -18,72 +17,31 @@ std::string byteSizeToString(usize size) {
     return fmt::format("{:.3f}{}", dsize, unit);
 }
 
-bool isOpenGLAtLeastVersion(u32 major, u32 minor) {
-    std::string version = (const char*)glGetString(GL_VERSION);
-    if (version.starts_with("OpenGL ES"))
-        return false;
-
-    auto rawVersion = version.substr(0, version.find_first_of(' '));
-    auto ver = VersionInfo::parse(rawVersion);
-    if (!ver)
-        return false;
-
-    return VersionInfo(major, minor, 0) <= ver.unwrap();
+static std::string currentGLVendor() {
+    auto& host = bismuth::gfx::Device::get().getHost();
+    if (!host.vendor.empty())
+        return host.vendor;
+    bismuth::gfx::HostGLInfo info;
+    bismuth::gfx::queryHostGL(info);
+    return info.vendor;
 }
 
-using ProcGlObjectLabel = void(*)(GLenum, GLuint, GLsizei, const char*);
+bool isNVidiaGPU() { return currentGLVendor().starts_with("NVIDIA"); }
+bool isAMDGPU()    { auto v = currentGLVendor(); return v.starts_with("AMD") || v.starts_with("ATI"); }
+bool isIntelGPU()  { return currentGLVendor().starts_with("Intel"); }
 
-ProcGlObjectLabel glObjectLabelProc = nullptr;
+namespace bismuth {
 
-void glObjectLabel(GLenum id, GLuint name, GLsizei length, const char* label) {
-    #ifdef GEODE_WINDOWS
-    if (!glObjectLabelProc)
-        glObjectLabelProc = (ProcGlObjectLabel)wglGetProcAddress("glObjectLabel");
-    if (glObjectLabelProc)
-        glObjectLabelProc(id, name, length, label);
-    #endif
-}
-
-static float fullscreenQuad[] = {
-    -1.0, -1.0,
-    -1.0,  1.0,
-     1.0,  1.0,
-    -1.0, -1.0,
-     1.0,  1.0,
-     1.0, -1.0
-};
-
-u32 fullscreenQuadVAO = 0;
-UPtr<Buffer> fullscreenQuadVBO = nullptr;
-
-void drawFullscreenQuad() {
-    if (!fullscreenQuadVAO) {
-        if (!fullscreenQuadVBO)
-            fullscreenQuadVBO = Buffer::createStaticDraw("Fullscreen quad buffer", fullscreenQuad, sizeof(fullscreenQuad));
-
-        glGenVertexArrays(1, &fullscreenQuadVAO);
-        glBindVertexArray(fullscreenQuadVAO);
-        fullscreenQuadVBO->bindAs(GL_ARRAY_BUFFER);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(float) * 2, (void*)0);
-        glEnableVertexAttribArray(0);
+void logMessage(LogLevel level, const char* message) {
+    switch (level) {
+    case LogLevel::Debug: log::debug("{}", message); break;
+    case LogLevel::Info:  log::info("{}", message); break;
+    case LogLevel::Warn:  log::warn("{}", message); break;
+    case LogLevel::Error: log::error("{}", message); break;
     }
-
-    glBindVertexArray(fullscreenQuadVAO);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
 }
 
-#include <geode/modify/CCDirector.hpp>
-class $modify(CommonCCDirector, CCDirector) {
-    void purgeDirector() {
-        if (fullscreenQuadVAO)
-            glDeleteVertexArrays(1, &fullscreenQuadVAO);
-        
-        fullscreenQuadVAO = 0;
-        fullscreenQuadVBO = nullptr;
-
-        CCDirector::purgeDirector();
-    }
-};
+} // namespace bismuth
 
 std::optional<std::string> readResourceFile(const fs::path& path) {
     std::ifstream t(Mod::get()->getResourcesDir() / path);

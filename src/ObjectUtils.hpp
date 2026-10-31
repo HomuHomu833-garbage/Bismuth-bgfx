@@ -5,7 +5,7 @@
 #include <Geode/binding/GameObject.hpp>
 #include <common.hpp>
 #include <functional>
-#include "renderer/SAOBuffer.hpp"
+// Color channel / sprite type constants come from common.hpp (shaders/bismuth_shared.sh).
 
 enum class SpriteType {
     BASE   = 0,

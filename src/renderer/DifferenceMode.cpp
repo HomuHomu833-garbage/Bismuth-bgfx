@@ -1,104 +1,130 @@
-#include "Geode/cocos/CCDirector.h"
-#include "Geode/cocos/platform/win32/CCGL.h"
 #include "Renderer.hpp"
-#include <Geode/binding/Standalones.hpp>
-#include <cstddef>
+#include <gfx/Device.hpp>
 
 using namespace geode::prelude;
+namespace gfx = bismuth::gfx;
+
+static const char* kVertexShader = R"(
+attribute vec2 a_position;
+varying vec2 v_uv;
+void main() {
+    v_uv = a_position * 0.5 + 0.5;
+    gl_Position = vec4(a_position, 0.0, 1.0);
+}
+)";
+
+static const char* kFragmentShader = R"(
+uniform sampler2D u_vanillaFrame;
+uniform sampler2D u_bismuthFrame;
+uniform float u_intensity;
+uniform float u_backdropIntensity;
+varying vec2 v_uv;
+void main() {
+    vec3 vcol = texture2D(u_vanillaFrame, v_uv).rgb;
+    vec3 bcol = texture2D(u_bismuthFrame, v_uv).rgb;
+    vec3 diff = abs(vcol - bcol) * u_intensity + vcol * u_backdropIntensity;
+    gl_FragColor = vec4(diff, 1.0);
+}
+)";
 
 DifferenceMode::~DifferenceMode() {
-    destroyFramebuffers();
+    destroy();
+}
+
+void DifferenceMode::destroy() {
+    auto& device = gfx::Device::get();
+    if ((program || quad) && device.isInitialized() && !device.isHostContextLost()) {
+        auto& gl = gfx::glf();
+        if (program) gl.glDeleteProgram(program);
+        if (quad) gl.glDeleteBuffers(1, &quad);
+    }
+    program = 0;
+    quad = 0;
+    vanillaTexture = nullptr;
+    bismuthTexture = nullptr;
+}
+
+bool DifferenceMode::prepare(u32 width, u32 height) {
+    vanillaTexture = CCRenderTexture::create(width, height);
+    bismuthTexture = CCRenderTexture::create(width, height);
+
+    if (!program) {
+        auto& host = gfx::Device::get().getHost();
+        auto& gl = gfx::glf();
+        gfx::GLStateGuard guard(host);
+
+        static const char* attributes[] = { "a_position" };
+        program = gfx::compileHostProgram(host, kVertexShader, kFragmentShader, attributes, 1);
+        if (!program)
+            return false;
+        locVanilla   = gl.glGetUniformLocation(program, "u_vanillaFrame");
+        locBismuth   = gl.glGetUniformLocation(program, "u_bismuthFrame");
+        locIntensity = gl.glGetUniformLocation(program, "u_intensity");
+        locBackdrop  = gl.glGetUniformLocation(program, "u_backdropIntensity");
+
+        static const float positions[] = { -1.f, -1.f, 1.f, -1.f, -1.f, 1.f, 1.f, 1.f };
+        gl.glGenBuffers(1, &quad);
+        gl.glBindBuffer(gfx::gl::ARRAY_BUFFER, quad);
+        gl.glBufferData(gfx::gl::ARRAY_BUFFER, sizeof(positions), positions, gfx::gl::STATIC_DRAW);
+    }
+    return vanillaTexture && bismuthTexture;
 }
 
 void DifferenceMode::drawSceneHook() {
-    auto currentSize = CCDirector::get()->getOpenGLView()->getWindowedSize();
+    auto director = CCDirector::get();
+    auto currentSize = director->getWinSize();
 
     if (lastSize != currentSize) {
-        prepare(currentSize.width, currentSize.height);
+        if (!prepare((u32)currentSize.width, (u32)currentSize.height))
+            return;
         lastSize = currentSize;
     }
 
     bool prevEnabled = renderer.isEnabled();
 
-    // storeGLStates();
+    // The two renders of the same frame.
     renderer.setEnabled(false);
-    glBindFramebuffer(GL_FRAMEBUFFER, vanillaFramebuffer);
-    glClear(GL_COLOR_BUFFER_BIT);
-    kmGLPushMatrix();
-    CCDirector::get()->getRunningScene()->visit();
-    kmGLPopMatrix();
+    vanillaTexture->beginWithClear(0, 0, 0, 1);
+    director->getRunningScene()->visit();
+    vanillaTexture->end();
 
     renderer.setEnabled(true);
-    glBindFramebuffer(GL_FRAMEBUFFER, bismuthFramebuffer);
-    glClear(GL_COLOR_BUFFER_BIT);
-    kmGLPushMatrix();
-    CCDirector::get()->getRunningScene()->visit();
-    kmGLPopMatrix();
+    bismuthTexture->beginWithClear(0, 0, 0, 1);
+    director->getRunningScene()->visit();
+    bismuthTexture->end();
 
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    renderer.setEnabled(prevEnabled);
 
-    storeGLStates();
+    auto& host = gfx::Device::get().getHost();
+    auto& gl = gfx::glf();
+    {
+        gfx::GLStateGuard guard(host);
 
-    shader->use();
-    shader->setTexture(shader->location("u_vanillaFrame"), 0, vanillaTexture);
-    shader->setTexture(shader->location("u_bismuthFrame"), 1, bismuthTexture);
-    shader->setFloat("u_intensity", intensity);
-    shader->setFloat("u_backdropIntensity", backdropIntensity);
+        gl.glClear(gfx::gl::COLOR_BUFFER_BIT);
 
-    drawFullscreenQuad();
+        if (host.hasVAO)
+            gl.glBindVertexArray(0);
+        gl.glUseProgram(program);
+        gl.glUniform1i(locVanilla, 0);
+        gl.glUniform1i(locBismuth, 1);
+        gl.glUniform1f(locIntensity, intensity);
+        gl.glUniform1f(locBackdrop, backdropIntensity);
 
-    restoreGLStates();
+        gl.glActiveTexture(gfx::gl::TEXTURE0);
+        gl.glBindTexture(gfx::gl::TEXTURE_2D, vanillaTexture->getSprite()->getTexture()->getName());
+        gl.glActiveTexture(gfx::gl::TEXTURE0 + 1);
+        gl.glBindTexture(gfx::gl::TEXTURE_2D, bismuthTexture->getSprite()->getTexture()->getName());
 
-    CCDirector::get()->getOpenGLView()->swapBuffers();
-}
+        gl.glDisable(gfx::gl::BLEND);
+        gl.glBindBuffer(gfx::gl::ARRAY_BUFFER, quad);
+        for (gfx::GLuint i = 1; i < 8; i++)
+            gl.glDisableVertexAttribArray(i);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, gfx::gl::FLOAT, 0, 0, nullptr);
+        gl.glDrawArrays(gfx::gl::TRIANGLE_STRIP, 0, 4);
+    }
 
-static u32 createFramebufferTexture(u32 width, u32 height) {
-    u32 texture;
-    glGenTextures(1, &texture);
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    return texture;
-}
-
-static u32 createColorFramebuffer(u32 colorTextureAttachment) {
-    u32 fb;
-    glGenFramebuffers(1, &fb);
-    glBindFramebuffer(GL_FRAMEBUFFER, fb);
-    glBindTexture(GL_TEXTURE_2D, colorTextureAttachment);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTextureAttachment, 0);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    return fb;
-}
-
-void DifferenceMode::prepare(u32 width, u32 height) {
-    storeGLStates();
-
-    destroyFramebuffers();
-
-    vanillaTexture     = createFramebufferTexture(width, height);
-    vanillaFramebuffer = createColorFramebuffer(vanillaTexture);
-    bismuthTexture     = createFramebufferTexture(width, height);
-    bismuthFramebuffer = createColorFramebuffer(bismuthTexture);
-
-    if (!shader)
-        shader = Shader::create("fullscreen.vert", "differenceMode.frag");
-
-    restoreGLStates();
-}
-
-void DifferenceMode::destroyFramebuffers() {
-    if (vanillaFramebuffer) glDeleteFramebuffers(1, &vanillaFramebuffer);
-    if (bismuthFramebuffer) glDeleteFramebuffers(1, &bismuthFramebuffer);
-    if (vanillaTexture) glDeleteTextures(1, &vanillaTexture);
-    if (bismuthTexture) glDeleteTextures(1, &bismuthTexture);
-    vanillaFramebuffer = 0;
-    bismuthFramebuffer = 0;
-    vanillaTexture = 0;
-    bismuthTexture = 0;
+    director->getOpenGLView()->swapBuffers();
 }
 
 #include <Geode/modify/CCDirector.hpp>
@@ -106,7 +132,7 @@ class $modify(DifferenceModeCCDirector, CCDirector) {
     void drawScene() {
         DifferenceMode* diffMode = nullptr;
         auto renderer = Renderer::get();
-        if (renderer)
+        if (renderer && renderer->isActive())
             diffMode = renderer->getDifferenceMode();
 
         if (!diffMode) {

@@ -2,20 +2,23 @@
 
 #include <common.hpp>
 
-#include "ObjectBatch.hpp"
 #include "ObjectUtils.hpp"
 
+/*
+    Placeholder node at the z-order of a vanilla sprite batch node. When cocos2d
+    reaches it while drawing, Bismuth draws (or composites) that layer.
+*/
 class ObjectBatchNode : public cocos2d::CCNode {
 public:
     inline ObjectBatchNode(const LayerKey& id)
         : layerId(id) {}
 
-    bool init() override;
-
     void draw() override;
 
+    inline const LayerKey& getLayerKey() const { return layerId; }
+
 public:
-    static inline Ref<ObjectBatchNode> create(const LayerKey& id) {
+    static inline geode::Ref<ObjectBatchNode> create(const LayerKey& id) {
         auto ret = new ObjectBatchNode(id);
         if (ret->init()) {
             ret->autorelease();
@@ -27,5 +30,4 @@ public:
 
 private:
     LayerKey layerId;
-    cocos2d::CCTexture2D* spriteSheetTexture;
 };

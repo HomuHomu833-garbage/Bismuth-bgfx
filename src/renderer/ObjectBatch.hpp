@@ -3,48 +3,16 @@
 #include <Geode/binding/GameObject.hpp>
 #include <common.hpp>
 #include <Geode/Geode.hpp>
+#include <set>
 #include <vector>
 
-#include "Buffer.hpp"
-#include "glm/fwd.hpp"
+#include "BatchData.hpp"
 #include "math/ConvexList.hpp"
 #include "ObjectUtils.hpp"
 #include "WorkGroupScheduler.hpp"
 #include "../utils/GPUTimer.hpp"
 
 using namespace geode;
-
-/*
-    These are the vertex attributes of the
-    object batch. They are written in this
-    macro so you don't have duplicate code
-    with the and the attrib pointer calls.
-
-    Attrib_(attributeLocation, type, name)
-
-    NOTE: The positionOffset attribute is this
-          vertex' offset from the position of
-          the object this sprite belongs to.
-
-#define OBJECT_VERTEX_ATTRIBUTES(Attrib_) \
-    Attrib_(0, vec2, positionOffset) \
-    Attrib_(1, vec2, texCoord) \
-    Attrib_(2, u32,  spriteIndex)
-
-////////////////////////////////////////////////
-
-#define VERTEX_ATTRIBUTE_AS_STRUCT_MEMBER(Id_, Type_, Name_) \
-    Type_ Name_;
-
-#define VERTICIES_PER_QUAD 4
-#define INDICIES_PER_QUAD  6
-
-struct ObjectVertex {
-    OBJECT_VERTEX_ATTRIBUTES(VERTEX_ATTRIBUTE_AS_STRUCT_MEMBER);
-};
-*/
-
-////////////////////////////////////////////////
 
 class Renderer;
 
@@ -57,11 +25,14 @@ struct SpriteVertexTransforms {
     glm::vec2 texCoordUp;
 };
 
+/*
+    Turns the level's game objects into sprite meshes (written once), and keeps
+    track of the sprites sorted per layer for the current color blending states.
+*/
 class ObjectBatch {
 public:
     inline ObjectBatch(Renderer& renderer)
         : renderer(renderer) {}
-    ~ObjectBatch();
 
     SpriteVertexTransforms getSpriteVertexTransform(
         cocos2d::CCSprite* sprite,
@@ -77,7 +48,6 @@ public:
     );
 
     void writeSpriteVertex(glm::vec2 pos);
-    // void writeSpriteIndex(u32 index);
 
     void writeSpriteMeshFromConvexList(const ConvexList& list);
 
@@ -90,65 +60,44 @@ public:
 
     void writeGameObject(GameObject* object);
 
-    void finishWriting();
+    /// Moves the sprite meshes and input sprites into `out` (after the object infos).
+    void finishWriting(bismuth::StaticBatchData& out);
 
-    void draw(const LayerKey& layer);
+    /// Picks the sorted batch for the current blending states (generating it on a
+    /// worker thread if needed). Returns the batch to render this frame.
+    SortedObjectBatch* predraw();
+
+    inline SortedObjectBatch* getSortedBatch() const { return sortedBatch; }
 
     inline bool shouldDraw(const LayerKey& layer) const {
         if (!sortedBatch) return false;
-        auto it = sortedBatch->workGroupRangePerLayerKey.find(layer);
-        return it != sortedBatch->workGroupRangePerLayerKey.end() &&
-               it->second.count > 0;
+        auto it = sortedBatch->layerIndexPerKey.find(layer);
+        return it != sortedBatch->layerIndexPerKey.end() && it->second.spriteCount > 0;
     }
 
-    inline void bind() {
-        glBindVertexArray(vao);
-        indexBuffer->bindAs(GL_ELEMENT_ARRAY_BUFFER);
-    }
-
-    inline usize getVertexBufferSize() { return vertexCount * sizeof(ObjectVertex); }
+    inline usize getVertexBufferSize() { return vertexCount * sizeof(bismuth::PackedVertex); }
     inline void setSpriteSheetFilter(SpriteSheet sheet) { spriteSheetFilter = sheet; }
     inline const std::set<LayerKey>& getUsedLayerIds() { return usedLayerKeys; }
     inline usize getSpriteCount() { return workGroupScheduler.getSpriteCount(); }
-
-    void predraw();
-
-    void prepareCullingComputeShader();
-
-private:
-    void prepareVAO();
+    inline WorkGroupScheduler& getScheduler() { return workGroupScheduler; }
 
 private:
     Renderer& renderer;
 
     SpriteSheet spriteSheetFilter = (SpriteSheet)-1;
 
-    // Static buffers
-    UPtr<Buffer> vertexBuffer = nullptr;
-    UPtr<Buffer> indexBuffer = nullptr;
-    UPtr<Buffer> inputSpriteBuffer = nullptr;
-
-    // GPU buffers
-    UPtr<RawSprite::Buffer> rawSpriteBuffer = nullptr;
-    UPtr<Buffer> culledIndexBuffer = nullptr;
-
-    GPUTimer cullingComputeShaderTimer { "Culling compute shader time" };
-
-    u32 vao = 0;
+    GPUTimer cullingTimer { "Sprite culling" };
 
     WorkGroupScheduler workGroupScheduler;
     SortedObjectBatch* sortedBatch = nullptr;
 
     usize spriteCount = 0;
 
-    std::vector<ObjectVertex> verticies;
+    std::vector<bismuth::PackedVertex> verticies;
     u32 vertexCount = 0;
 
-    std::vector<u32> indicies;
-    u32 indexCount = 0;
-
-    std::vector<InputSprite> inputSprites;
-    // std::vector<PreCulledSprite> preCulledSprites;
+    // (objectIndex, spriteType, firstTriangle, triangleCount)
+    std::vector<bismuth::UVec4> inputSprites;
 
     std::set<LayerKey> usedLayerKeys;
 
