@@ -7,6 +7,11 @@ Currently experimental
 
 <img src="logo.png" alt="Bismuth logo" width="100"/>
 
+Bismuth renders through [bgfx](https://github.com/bkaradzic/bgfx) on Windows,
+macOS, iOS and Android: Vulkan / Metal by default, with an OpenGL fallback that
+runs inside Geometry Dash's own context. Linux is supported through the Windows
+build under Wine / Proton. See [docs/RENDERING.md](docs/RENDERING.md).
+
 ## License
 
 Bismuth - Optimization mod for Geometry Dash

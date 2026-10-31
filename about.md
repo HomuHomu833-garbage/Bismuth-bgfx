@@ -35,4 +35,6 @@ of broken stuff to be fixed first.
 
 2.2 levels currently don't work correctly.
 
+Bismuth renders with Vulkan (Windows, Android) or Metal (macOS, iOS), and falls back to OpenGL when they can't be used. The backend can be changed in the settings.
+
 Icon created by Saryu
