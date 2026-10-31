@@ -17,7 +17,7 @@
 
 #include <TargetConditionals.h>
 #import <Metal/Metal.h>
-#import <IOSurface/IOSurface.h>
+#import <IOSurface/IOSurfaceRef.h> // IOSurface.h is macOS-only
 #import <CoreVideo/CoreVideo.h>
 
 #if TARGET_OS_IPHONE
