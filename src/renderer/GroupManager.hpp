@@ -42,7 +42,7 @@ public:
         count = c.count;
     }
 
-    void removeGroupIdsNotInSet(const std::set<GroupID> maskSet);
+    void removeGroupIdsNotInSet(const std::set<GroupID>& maskSet);
 
     inline GroupCombination(GameObject* object)
         : GroupCombination(object->m_groups, object->m_groupCount) {}

@@ -38,7 +38,7 @@ GroupCombination::GroupCombination(std::vector<GroupID> groupIds) {
     std::sort(ids.begin(), ids.begin() + count);
 }
 
-void GroupCombination::removeGroupIdsNotInSet(const std::set<GroupID> maskSet) {
+void GroupCombination::removeGroupIdsNotInSet(const std::set<GroupID>& maskSet) {
     for (i32 i = 0; i < count; i++) {
         if (!maskSet.contains(ids[i]))
             ids[i] = 0;
@@ -69,12 +69,17 @@ GroupCombination::operator std::string() const {
 
 GroupManager::~GroupManager() {}
 
-static std::set<GameObject*> dobjects;
-
 void GroupManager::initWithObjects(cocos2d::CCArray* objects) {
     auto emptyGroupComb = GroupCombination(std::vector<GroupID>{});
     addGroupCombination(emptyGroupComb, 0);
     GroupCombinationIndex groupCombIndex = 1;
+
+    // Group combinations in the order objects first use them. Levels have
+    // hundreds of thousands of objects but few combinations, so the per
+    // combination work below runs once per combination (same indices as
+    // doing it per object in object order).
+    std::vector<GroupCombinationIndex> combinationsInObjectOrder;
+    std::vector<bool> combinationSeen(1, false);
 
     for (auto object : CCArrayExt<GameObject*>(objects)) {
         std::optional<GroupID> targetGroupId = getTargetGroupIdOfTransformingTrigger(object);
@@ -84,13 +89,21 @@ void GroupManager::initWithObjects(cocos2d::CCArray* objects) {
         else if (object->m_objectID == ALPHA_TRIGGER_ID || object->m_objectID == TOGGLE_TRIGGER_ID)
             alphaGroupIds.insert(((EffectGameObject*)object)->m_targetGroupID);
 
-        dobjects.insert(object);
-        
         GroupCombination comb = GroupCombination(object);
 
-        if (groupCombinationIndicies.find(comb) == groupCombinationIndicies.end()) {
-            addGroupCombination(comb, groupCombIndex);
-            groupCombIndex++;
+        GroupCombinationIndex combIndex;
+        auto it = groupCombinationIndicies.find(comb);
+        if (it == groupCombinationIndicies.end()) {
+            combIndex = groupCombIndex++;
+            addGroupCombination(comb, combIndex);
+            combinationSeen.push_back(false);
+        } else {
+            combIndex = it->second;
+        }
+
+        if (!combinationSeen[combIndex]) {
+            combinationSeen[combIndex] = true;
+            combinationsInObjectOrder.push_back(combIndex);
         }
     }
 
@@ -101,9 +114,8 @@ void GroupManager::initWithObjects(cocos2d::CCArray* objects) {
 
     alphaIndiciesPerGroupCombinationIndex.resize(groupCombinationCount);
 
-    for (auto object : CCArrayExt<GameObject*>(objects)) {
-        GroupCombination comb = GroupCombination(object);
-        auto combIndex = groupCombinationIndicies[comb];
+    for (auto combIndex : combinationsInObjectOrder) {
+        const GroupCombination& comb = groupCombinations[combIndex];
 
         GroupCombination transformComb = comb;
         transformComb.removeGroupIdsNotInSet(transformGroupIds);
@@ -113,9 +125,11 @@ void GroupManager::initWithObjects(cocos2d::CCArray* objects) {
             firstGroupIndexPerTransformIndex.push_back(combIndex);
             transformCombIndex++;
         }
-        
+
+        // Upstream keeps every group of the combination here (its
+        // removeGroupIdsNotInSet(alphaGroupIds) call was applied to another
+        // variable), so alpha is computed over all of an object's groups.
         GroupCombination alphaComb = comb;
-        comb.removeGroupIdsNotInSet(alphaGroupIds);
 
         if (alphaIndicies.find(alphaComb) == alphaIndicies.end()) {
             alphaIndicies[alphaComb] = alphaCombIndex;
