@@ -192,6 +192,7 @@ private:
 
     bool enabled = false;
     bool active = false;
+    bool disabledInSettings = false;
     bool debugTextEnabled = false;
     bool ingameEnableDisable = false;
     bool hasCulledOnce = false;

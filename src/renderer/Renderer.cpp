@@ -209,8 +209,10 @@ bool Renderer::init(PlayLayer* layer, CCArray* levelObjects) {
     for (auto& handle : spriteSheetHandles)
         handle = BGFX_INVALID_HANDLE;
 
-    if (!Mod::get()->getSettingValue<bool>("enabled"))
+    if (!Mod::get()->getSettingValue<bool>("enabled")) {
+        disabledInSettings = true;
         return false;
+    }
 
     std::string report;
     if (!ensureBismuthDevice(report)) {
@@ -834,7 +836,10 @@ Ref<Renderer> Renderer::create(PlayLayer* layer, CCArray* objects) {
         return ren;
     }
 
-    log::error("Failed to initialize renderer");
+    if (ren->disabledInSettings)
+        log::info("Bismuth is turned off in its settings (\"Bismuth enabled\"), the level renders normally");
+    else
+        log::error("Failed to initialize renderer, the level renders normally (see the errors above)");
     delete ren;
     return nullptr;
 }
