@@ -298,6 +298,11 @@ void Device::shutdown() {
     if (isHostContextLost())
         hostLost = true;
 
+    // Host mode textures are overrides of GD's (flagged shared, so bgfx never
+    // deletes the GL texture); the others are bgfx's own.
+    hostTextures.destroyAll();
+    generation++;
+
     if (hostLost) {
         // GL objects died with the old context; never delete names that may
         // now belong to the new context.

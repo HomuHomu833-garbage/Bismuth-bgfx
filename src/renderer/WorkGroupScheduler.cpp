@@ -18,6 +18,11 @@ void WorkGroupScheduler::addSprite(
     u32 inputSpriteIndex,
     u32 triCount
 ) {
+    if (object != lastObject) {
+        lastObject = object;
+        lastGroupCombinationIndex = Renderer::get()->getGroupManager().getGroupCombinationIndexForObject(object);
+    }
+
     spriteEntries.push_back({
         .zOrder = object->getObjectZOrder(),
         .zLayer = object->getObjectZLayer(),
@@ -25,7 +30,7 @@ void WorkGroupScheduler::addSprite(
         .colorChannelId = (u16)ObjectUtils::getSpriteColorChannel(type, object, sprite),
         .inputSpriteIndex = inputSpriteIndex,
         .triCount = triCount,
-        .groupCombinationIndex = Renderer::get()->getGroupManager().getGroupCombinationIndexForObject(object),
+        .groupCombinationIndex = lastGroupCombinationIndex,
         .startPosition = ccPointToGLM(object->m_startPosition)
     });
 }

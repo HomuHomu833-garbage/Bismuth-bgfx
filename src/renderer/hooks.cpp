@@ -342,6 +342,9 @@ public:
             return;
         }
 
+        // Copy the sprite sheets now rather than when the first level opens.
+        Renderer::preloadSpriteSheets();
+
         auto& device = bismuth::gfx::Device::get();
         if (device.getCullingPath() == bismuth::gfx::CullingPath::Gpu && getGPUCoreCount() == -1) {
 #ifdef GEODE_IS_WINDOWS

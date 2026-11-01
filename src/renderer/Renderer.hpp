@@ -175,6 +175,10 @@ public:
 public:
     static Ref<Renderer> create(PlayLayer* layer, cocos2d::CCArray* objects);
 
+    /// Imports GD's sprite sheets into bgfx ahead of the first level (slow with
+    /// Vulkan / Metal, which copy them). Imports are kept for the session.
+    static void preloadSpriteSheets();
+
     /**
      * Returns the current renderer. If the game
      * is not in a PlayLayer. This returns nullptr.
@@ -182,6 +186,8 @@ public:
     static Ref<Renderer> get();
 
 private:
+    static void importSpriteSheets(cocos2d::CCTexture2D* textures[], bgfx::TextureHandle handles[]);
+
     PlayLayer* layer;
 
     bool enabled = false;
@@ -207,7 +213,6 @@ private:
 
     cocos2d::CCTexture2D* spriteSheets[(i32)SpriteSheet::COUNT] = { nullptr };
     bgfx::TextureHandle spriteSheetHandles[(i32)SpriteSheet::COUNT];
-    bismuth::gfx::HostTextures hostTextures;
 
     ColorChannelBlendStates colorChannelsIsBlending;
 

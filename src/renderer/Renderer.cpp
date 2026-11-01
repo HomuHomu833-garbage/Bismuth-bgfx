@@ -67,6 +67,109 @@ static gfx::DeviceOptions deviceOptionsFromSettings() {
     when Geometry Dash's GL context was replaced (Android after backgrounding,
     window recreation).
 */
+namespace {
+
+/// Logs how long each step of a level's setup takes.
+class LoadTimer {
+public:
+    void step(const char* name) {
+        u64 now = getTime();
+        log::info("Bismuth: {} took {:.1f} ms", name, (double)(now - last) / 1000000.0);
+        last = now;
+    }
+
+private:
+    u64 last = getTime();
+};
+
+const char* spriteSheetFile(SpriteSheet sheet) {
+    switch (sheet) {
+        case SpriteSheet::GAME_1:   return "GJ_GameSheet.png";
+        case SpriteSheet::GAME_2:   return "GJ_GameSheet02.png";
+        case SpriteSheet::PARTICLE: return "GJ_ParticleSheet.png";
+        case SpriteSheet::GLOW:     return "GJ_GameSheetGlow.png";
+        case SpriteSheet::FIRE:     return "FireSheet_01.png";
+        case SpriteSheet::PIXEL:    return "PixelSheet_01.png";
+        default:                    return nullptr;
+    }
+}
+
+// Sprite sheets imported into bgfx, kept across levels (see Device::getHostTextures).
+// The CCTexture2Ds are retained so their GL names can't be reused by another texture.
+struct ImportedSheet {
+    Ref<CCTexture2D> texture;
+    GLuint glName = 0;
+    bgfx::TextureHandle handle = BGFX_INVALID_HANDLE;
+};
+std::vector<ImportedSheet> importedSheets;
+u32 importedGeneration = 0;
+
+bgfx::TextureHandle importSpriteSheet(CCTexture2D* texture) {
+    auto& device = gfx::Device::get();
+    auto& textures = device.getHostTextures();
+
+    for (auto& sheet : importedSheets) {
+        if (sheet.texture == texture && sheet.glName == texture->getName())
+            return sheet.handle;
+    }
+
+    auto handle = textures.import(texture->getName(), texture->getPixelsWide(), texture->getPixelsHigh());
+    if (bgfx::isValid(handle))
+        importedSheets.push_back({ texture, texture->getName(), handle });
+    return handle;
+}
+
+} // namespace
+
+void Renderer::importSpriteSheets(CCTexture2D* textures[], bgfx::TextureHandle handles[]) {
+    auto& device = gfx::Device::get();
+    auto& hostTextures = device.getHostTextures();
+
+    if (importedGeneration != device.getGeneration()) {
+        // The device restarted: its textures are gone.
+        importedSheets.clear();
+        importedGeneration = device.getGeneration();
+    }
+
+    // Drop the sheets GD replaced (texture reload, texture packs): only we hold them.
+    for (auto it = importedSheets.begin(); it != importedSheets.end();) {
+        if (it->texture->retainCount() == 1 || it->texture->getName() != it->glName) {
+            hostTextures.release(it->handle);
+            it = importedSheets.erase(it);
+        } else {
+            it++;
+        }
+    }
+
+    auto tcache = CCTextureCache::get();
+    for (i32 i = 0; i < (i32)SpriteSheet::COUNT; i++) {
+        textures[i] = nullptr;
+        handles[i] = BGFX_INVALID_HANDLE;
+
+        const char* file = spriteSheetFile((SpriteSheet)i);
+        if (!file)
+            continue;
+
+        textures[i] = tcache->addImage(file, false);
+        if (textures[i])
+            handles[i] = importSpriteSheet(textures[i]);
+    }
+}
+
+void Renderer::preloadSpriteSheets() {
+    auto& device = gfx::Device::get();
+    // In-context OpenGL needs no copy (and a bgfx frame to finish the import).
+    if (!device.isInitialized() || device.isHostMode())
+        return;
+
+    CCTexture2D* textures[(i32)SpriteSheet::COUNT];
+    bgfx::TextureHandle handles[(i32)SpriteSheet::COUNT];
+
+    LoadTimer timer;
+    importSpriteSheets(textures, handles);
+    timer.step("preloading sprite sheets");
+}
+
 bool ensureBismuthDevice(std::string& report) {
     static gfx::DeviceOptions lastOptions;
     auto& device = gfx::Device::get();
@@ -129,24 +232,16 @@ bool Renderer::init(PlayLayer* layer, CCArray* levelObjects) {
 
     log::info("Bismuth: {}", device.describe());
 
-    auto tcache = cocos2d::CCTextureCache::get();
-    // TODO: Add text sheet
-    spriteSheets[(i32)SpriteSheet::GAME_1]   = tcache->addImage("GJ_GameSheet.png", false);
-    spriteSheets[(i32)SpriteSheet::GAME_2]   = tcache->addImage("GJ_GameSheet02.png", false);
-    spriteSheets[(i32)SpriteSheet::PARTICLE] = tcache->addImage("GJ_ParticleSheet.png", false);
-    spriteSheets[(i32)SpriteSheet::GLOW]     = tcache->addImage("GJ_GameSheetGlow.png", false);
-    spriteSheets[(i32)SpriteSheet::FIRE]     = tcache->addImage("FireSheet_01.png", false);
-    spriteSheets[(i32)SpriteSheet::PIXEL]    = tcache->addImage("PixelSheet_01.png", false);
+    LoadTimer loadTimer;
 
-    for (i32 i = 0; i < (i32)SpriteSheet::COUNT; i++) {
-        auto texture = spriteSheets[i];
-        if (texture)
-            spriteSheetHandles[i] = hostTextures.import(texture->getName(), texture->getPixelsWide(), texture->getPixelsHigh());
-    }
+    importSpriteSheets(spriteSheets, spriteSheetHandles);
+    loadTimer.step("sprite sheets");
 
     SpriteMeshDictionary::loadFromFile("spriteMeshes.json");
+    loadTimer.step("sprite meshes");
 
     groupManager.initWithObjects(levelObjects);
+    loadTimer.step("groups");
 
     ObjectSorter sorter;
     sorter.initForGameLayer(layer);
@@ -176,6 +271,7 @@ bool Renderer::init(PlayLayer* layer, CCArray* levelObjects) {
 
     for (auto it = sorter.iterator(); !it.isEnd(); it.next())
         objects.push_back(it.get());
+    loadTimer.step("sorting objects");
 
     log::info("Generating static rendering buffer....");
 
@@ -183,6 +279,7 @@ bool Renderer::init(PlayLayer* layer, CCArray* levelObjects) {
 
     bismuth::StaticBatchData staticData;
     generateStaticRenderingBuffer(objects, staticData);
+    loadTimer.step("static rendering buffer");
 
     u32 groupCombCount = groupManager.getGroupCombinationCount();
     log::info("{} group combinations detected", groupCombCount);
@@ -207,6 +304,7 @@ bool Renderer::init(PlayLayer* layer, CCArray* levelObjects) {
         objectBatch.writeGameObject(object);
     objectBatch.finishWriting(staticData);
     generateBatchNodes();
+    loadTimer.step("vertex buffer");
 
     log::info("Sprite count: {}", objectBatch.getSpriteCount());
 
@@ -219,7 +317,8 @@ bool Renderer::init(PlayLayer* layer, CCArray* levelObjects) {
     // pointed at cocos2d's textures.
     if (device.isHostMode())
         device.flushHost();
-    hostTextures.finishImports();
+    device.getHostTextures().finishImports();
+    loadTimer.step("GPU resources");
 
     debugText = CCLabelBMFont::create("", "chatFont.fnt");
     debugTextOutline1 = CCLabelBMFont::create("", "chatFont.fnt");
@@ -302,7 +401,6 @@ void Renderer::terminate() {
 
     overdrawView.releaseResources();
     batchRenderer.shutdown();
-    hostTextures.destroyAll();
 
     currentRenderer = nullptr;
     log::info("Renderer terminated");

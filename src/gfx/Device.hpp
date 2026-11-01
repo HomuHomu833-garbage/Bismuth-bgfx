@@ -17,6 +17,7 @@
 #include <bgfx/bgfx.h>
 #include "HostGL.hpp"
 #include "Interop.hpp"
+#include "HostTextures.hpp"
 #include <string>
 
 namespace bismuth::gfx {
@@ -54,6 +55,14 @@ public:
     Interop* getInterop() const { return interop.get(); }
     Compositor& getCompositor() { return compositor; }
 
+    /// GD textures imported into bgfx (sprite sheets). Kept for the whole
+    /// session: importing them is slow with Vulkan / Metal (GPU readback).
+    /// Emptied when the device shuts down.
+    HostTextures& getHostTextures() { return hostTextures; }
+
+    /// Changes every time the device shuts down, invalidating every bgfx handle.
+    u32 getGeneration() const { return generation; }
+
     /// True if GD's GL context changed since init (Android can destroy it).
     bool isHostContextLost();
 
@@ -89,6 +98,8 @@ private:
     HostGLInfo host;
     UPtr<Interop> interop;
     Compositor compositor;
+    HostTextures hostTextures;
+    u32 generation = 0;
     bool hostLost = false;
 
     u32 lastFrameNumber = 0;

@@ -88,6 +88,9 @@ private:
     };
 
     std::vector<SpriteEntry> spriteEntries;
+    // addSprite() gets an object's sprites one after another.
+    GameObject* lastObject = nullptr;
+    u32 lastGroupCombinationIndex = 0;
 
     struct GenerationJob {
         //// INPUTS ////

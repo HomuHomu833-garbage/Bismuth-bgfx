@@ -25,6 +25,9 @@ public:
     /// (host mode needs bgfx to create its placeholder textures first).
     void finishImports();
 
+    /// Destroys one imported texture.
+    void release(bgfx::TextureHandle handle);
+
     void destroyAll();
 
 private:
