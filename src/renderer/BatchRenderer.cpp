@@ -1,7 +1,32 @@
+#include <cstring>
 #include "BatchRenderer.hpp"
 #include <gfx/Programs.hpp>
 
 #include <algorithm>
+
+
+namespace {
+
+/// Gives a vector's contents to bgfx without copying (freed once uploaded).
+/// Empty vectors become one zeroed uvec4, as buffers can't be empty.
+template <class T>
+const bgfx::Memory* moveToBgfx(std::vector<T>& vector) {
+    if (vector.empty()) {
+        const bgfx::Memory* memory = bgfx::alloc(sizeof(bismuth::UVec4));
+        std::memset(memory->data, 0, memory->size);
+        return memory;
+    }
+
+    auto* owned = new std::vector<T>(std::move(vector));
+    vector = {};
+    return bgfx::makeRef(
+        owned->data(), (u32)(owned->size() * sizeof(T)),
+        [](void*, void* userData) { delete static_cast<std::vector<T>*>(userData); },
+        owned
+    );
+}
+
+} // namespace
 
 namespace bismuth {
 
@@ -49,15 +74,13 @@ bool BatchRenderer::init(StaticBatchData staticData, gfx::CullingPath cullingPat
         if (!bgfx::isValid(cullProgram) || !bgfx::isValid(scanProgram) || !bgfx::isValid(copyProgram))
             return false;
 
+        // The CPU copies aren't needed after this: hand them to bgfx instead of
+        // copying them (they reach hundreds of MB on very large levels).
         const u32 staticSize = (u32)(data.staticBuffer.size() * sizeof(UVec4));
-        staticBuffer = bgfx::createVertexBuffer(
-            bgfx::copy(data.staticBuffer.data(), std::max<u32>(staticSize, sizeof(UVec4))),
-            uvec4Layout, BGFX_BUFFER_COMPUTE_READ);
+        staticBuffer = bgfx::createVertexBuffer(moveToBgfx(data.staticBuffer), uvec4Layout, BGFX_BUFFER_COMPUTE_READ);
 
         const u32 vertexSize = (u32)(data.vertices.size() * sizeof(PackedVertex));
-        vertexBuffer = bgfx::createVertexBuffer(
-            bgfx::copy(data.vertices.data(), std::max<u32>(vertexSize, sizeof(UVec4))),
-            uvec4Layout, BGFX_BUFFER_COMPUTE_READ);
+        vertexBuffer = bgfx::createVertexBuffer(moveToBgfx(data.vertices), uvec4Layout, BGFX_BUFFER_COMPUTE_READ);
 
         const u32 triangles = std::max<u32>(data.triangleCount, 1);
         culledTris  = bgfx::createDynamicIndexBuffer(triangles, BGFX_BUFFER_INDEX32 | BGFX_BUFFER_COMPUTE_READ_WRITE);
@@ -67,9 +90,11 @@ bool BatchRenderer::init(StaticBatchData staticData, gfx::CullingPath cullingPat
 
         staticBytes = staticSize + vertexSize + (u64)triangles * 8 + (u64)data.inputSpriteCount * RAW_SPRITE_STRIDE * 16;
 
-        // The GPU path never needs the CPU copies again.
-        data.staticBuffer = {};
-        data.vertices = {};
+        logf(LogLevel::Info,
+            "Bismuth: GPU buffers: objects %.1f MB, vertices %.1f MB, triangles 2 x %.1f MB, sprites %.1f MB",
+            staticSize / 1048576.0, vertexSize / 1048576.0, triangles * 4 / 1048576.0,
+            (double)data.inputSpriteCount * RAW_SPRITE_STRIDE * 16 / 1048576.0);
+
     } else {
         drawProgram     = gfx::loadProgram("vs_object_cpu", "fs_object", profile);
         overdrawProgram = gfx::loadProgram("vs_object_cpu", "fs_overdraw_count", profile);
