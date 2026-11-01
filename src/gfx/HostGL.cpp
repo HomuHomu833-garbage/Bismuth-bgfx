@@ -359,9 +359,6 @@ GLStateGuard::~GLStateGuard() {
     auto& gl = s_functions;
     const auto& s = state;
 
-    // Drop any error raised by bgfx so the host's own error checks stay clean.
-    while (gl.glGetError() != gl::NO_ERROR_) {}
-
     gl.glUseProgram((GLuint)s.program);
 
     if (info.hasVAO)
@@ -406,6 +403,8 @@ GLStateGuard::~GLStateGuard() {
     gl.glPixelStorei(gl::UNPACK_ALIGNMENT, s.unpackAlignment);
     gl.glPixelStorei(gl::PACK_ALIGNMENT, s.packAlignment);
 
+    // Drop any error raised by bgfx (or the restore) so the host's own error
+    // checks stay clean. Done once: each glGetError can stall the driver.
     while (gl.glGetError() != gl::NO_ERROR_) {}
 }
 

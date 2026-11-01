@@ -225,8 +225,8 @@ static Result renderWith(HostWindow& host, const test::Scene& scene, BackendPref
                 device.flushHost();
                 textures.finishImports();
             }
+            // Culling goes out with the first layer's flush (views run in order).
             batch.cull(0);
-            device.flushHost();
             for (u32 l = 0; l < scene.layerCount; l++) {
                 device.setHostViewRect(1);
                 bgfx::setViewFrameBuffer(1, BGFX_INVALID_HANDLE);

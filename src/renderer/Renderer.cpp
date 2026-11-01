@@ -671,8 +671,14 @@ void Renderer::draw() {
 
     if (device.isHostMode()) {
         if (needsCulling) {
+            // Submitted with the first group's flush: bgfx runs the compute
+            // view before the draw views. Each flush saves and restores GD's
+            // GL state, which is slow on some drivers (e.g. Mesa's glthread).
+            auto timer = BProfiler::start("Bismuth culling");
             batchRenderer.cull(RendererViews::Compute);
-            device.flushHost();
+            timer.end();
+            if (groups.empty())
+                device.flushHost();
         }
         overdrawView.beginFrame();
     } else {
@@ -690,8 +696,11 @@ void Renderer::draw() {
             return;
         }
 
-        if (needsCulling)
+        if (needsCulling) {
+            auto timer = BProfiler::start("Bismuth culling");
             batchRenderer.cull(RendererViews::Compute);
+            timer.end();
+        }
 
         overdrawView.beginFrame(width, height);
 
@@ -781,6 +790,11 @@ void Renderer::updateDebugText() {
             text += fmt::format("{}\n", host.renderer);
             text += fmt::format("Window: {}x{}\n", screenSize.width, screenSize.height);
             text += fmt::format("GPU time: {:.3f}ms\n", device.getLastGpuTimeMs());
+            if (device.isHostMode()) {
+                const auto& flush = device.getLastHostFlushStats();
+                text += fmt::format("GL flushes: {}, save {:.3f}ms, bgfx {:.3f}ms, restore {:.3f}ms\n",
+                                    flush.count, flush.saveMs, flush.bgfxMs, flush.restoreMs);
+            }
             text += fmt::format("Layers: {} in {} group(s)\n", batchNodes.size(), groups.size());
             text += fmt::format("Vertex buffer size: {}\n", byteSizeToString(objectBatch.getVertexBufferSize()));
             if (batchRenderer.getCullingPath() == gfx::CullingPath::Cpu)

@@ -82,6 +82,15 @@ public:
 
     /// GPU time (ms) of the bgfx frames submitted during the last game frame.
     double getLastGpuTimeMs() const { return lastGpuTimeMs; }
+
+    /// CPU time of the last game frame's host mode flushes.
+    struct HostFlushStats {
+        u32 count = 0;
+        double saveMs = 0.0;    // reading GD's GL state
+        double bgfxMs = 0.0;    // bgfx::frame()
+        double restoreMs = 0.0; // restoring GD's GL state
+    };
+    const HostFlushStats& getLastHostFlushStats() const { return lastFlushStats; }
     void endGameFrame();
 
     std::string describe() const;
@@ -105,6 +114,8 @@ private:
     u32 lastFrameNumber = 0;
     double frameGpuTimeMs = 0.0;
     double lastGpuTimeMs = 0.0;
+    HostFlushStats flushStats;
+    HostFlushStats lastFlushStats;
     std::string cullingReason;
 };
 

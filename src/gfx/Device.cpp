@@ -1,5 +1,7 @@
 #include "Device.hpp"
 
+#include <chrono>
+
 #include <bgfx/platform.h>
 #include <bx/allocator.h>
 #include <cstdarg>
@@ -363,9 +365,25 @@ void Device::setHostViewRect(bgfx::ViewId view) {
 }
 
 void Device::flushHost() {
-    GLStateGuard guard(host);
-    bgfx::glSetHostFramebuffer((u32)guard.snapshot().drawFramebuffer);
-    lastFrameNumber = bgfx::frame();
+    using Clock = std::chrono::steady_clock;
+    auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+
+    auto t0 = Clock::now();
+    Clock::time_point t1, t2;
+    {
+        GLStateGuard guard(host);
+        t1 = Clock::now();
+        bgfx::glSetHostFramebuffer((u32)guard.snapshot().drawFramebuffer);
+        lastFrameNumber = bgfx::frame();
+        t2 = Clock::now();
+    }
+    auto t3 = Clock::now();
+
+    flushStats.count++;
+    flushStats.saveMs += ms(t1 - t0);
+    flushStats.bgfxMs += ms(t2 - t1);
+    flushStats.restoreMs += ms(t3 - t2);
+
     accumulateStats();
 }
 
@@ -385,6 +403,8 @@ void Device::accumulateStats() {
 void Device::endGameFrame() {
     lastGpuTimeMs = frameGpuTimeMs;
     frameGpuTimeMs = 0.0;
+    lastFlushStats = flushStats;
+    flushStats = {};
 }
 
 std::string Device::describe() const {
