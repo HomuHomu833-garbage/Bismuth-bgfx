@@ -24,6 +24,7 @@ add_library(bismuth_core STATIC
     ${ROOT}/src/gfx/InteropVulkan.cpp
     ${ROOT}/src/gfx/Programs.cpp
     ${ROOT}/src/gfx/HostTextures.cpp
+    ${ROOT}/src/gfx/HostSpriteRenderer.cpp
     ${ROOT}/src/renderer/CpuCuller.cpp
     ${ROOT}/src/renderer/BatchRenderer.cpp
 )

@@ -56,6 +56,12 @@ blocks, audio scale).
   Used when compute shaders aren't available (e.g. OpenGL fallback on macOS,
   iOS and Android, old GPUs), or when forced in the settings.
 
+With OpenGL and CPU culling, sprites aren't drawn through bgfx but with a few
+raw GL calls per layer (`src/gfx/HostSpriteRenderer.cpp`), restoring only the
+state they change: a bgfx frame per composite group costs a lot where GL calls
+are expensive (Wine + Box64 on ARM, drivers running GL on a separate thread).
+The overdraw view still uses bgfx.
+
 Both use the same code: `shaders/bismuth_kernel.sh` is written in a subset that
 compiles as GLSL, as bgfx's HLSL-based shader language (SPIR-V, Metal) and as
 C++ (with glm). `tests/render_test.cpp` checks that every backend and culling

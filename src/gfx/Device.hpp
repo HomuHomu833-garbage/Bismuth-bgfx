@@ -18,6 +18,7 @@
 #include "HostGL.hpp"
 #include "Interop.hpp"
 #include "HostTextures.hpp"
+#include "HostSpriteRenderer.hpp"
 #include <string>
 
 namespace bismuth::gfx {
@@ -59,6 +60,10 @@ public:
     /// session: importing them is slow with Vulkan / Metal (GPU readback).
     /// Emptied when the device shuts down.
     HostTextures& getHostTextures() { return hostTextures; }
+
+    /// OpenGL mode with CPU culling: draws sprites without bgfx (see
+    /// HostSpriteRenderer). Created on first use; nullptr if unavailable.
+    HostSpriteRenderer* getHostSpriteRenderer();
 
     /// Changes every time the device shuts down, invalidating every bgfx handle.
     u32 getGeneration() const { return generation; }
@@ -112,6 +117,8 @@ private:
     UPtr<Interop> interop;
     Compositor compositor;
     HostTextures hostTextures;
+    HostSpriteRenderer spriteRenderer;
+    bool spriteRendererFailed = false;
     u32 generation = 0;
     bool hostLost = false;
 

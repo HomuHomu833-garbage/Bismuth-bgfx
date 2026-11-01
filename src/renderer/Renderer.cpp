@@ -632,6 +632,35 @@ void Renderer::drawGroupLayers(const CompositeGroup& group, bgfx::ViewId view, b
     }
 }
 
+void Renderer::drawGroupDirect(const CompositeGroup& group) {
+    auto* spriteRenderer = gfx::Device::get().getHostSpriteRenderer();
+    auto sorted = objectBatch.getSortedBatch();
+    if (!spriteRenderer || !sorted)
+        return;
+
+    directLayers.clear();
+    for (auto node : group.nodes) {
+        const LayerKey& key = node->getLayerKey();
+        auto it = sorted->layerIndexPerKey.find(key);
+        if (it == sorted->layerIndexPerKey.end())
+            continue;
+
+        auto texture = getSpriteSheetTexture(key.spriteSheet);
+        auto range = batchRenderer.getCpuLayerRange(it->second.index);
+        if (!texture || range.vertexCount == 0)
+            continue;
+
+        directLayers.push_back({
+            .firstVertex = range.firstVertex,
+            .vertexCount = range.vertexCount,
+            .texture = texture->getName(),
+            .additive = blendForLayer(key) == LayerBlend::Additive,
+        });
+    }
+
+    spriteRenderer->draw(gameState.mvp, directLayers.data(), (u32)directLayers.size());
+}
+
 //// FRAME ////
 
 void Renderer::draw() {
@@ -674,16 +703,28 @@ void Renderer::draw() {
     renderingTimer.start();
 
     if (device.isHostMode()) {
+        // Without bgfx when possible: a bgfx frame per composite group costs a
+        // lot where GL calls are expensive (Wine + Box64, GL on a separate thread).
+        auto* spriteRenderer = (batchRenderer.getCullingPath() == gfx::CullingPath::Cpu && !overdrawView.isEnabled())
+            ? device.getHostSpriteRenderer() : nullptr;
+        directHostDraw = spriteRenderer != nullptr;
+
         if (needsCulling) {
-            // Submitted with the first group's flush: bgfx runs the compute
-            // view before the draw views. Each flush saves and restores GD's
-            // GL state, which is slow on some drivers (e.g. Mesa's glthread).
+            // bgfx: submitted with the first group's flush, as bgfx runs the
+            // compute view before the draw views.
             auto timer = BProfiler::start("Bismuth culling");
-            batchRenderer.cull(RendererViews::Compute);
+            batchRenderer.cull(RendererViews::Compute, !directHostDraw);
             timer.end();
-            if (groups.empty())
+            if (groups.empty() && !directHostDraw)
                 device.flushHost();
         }
+
+        if (directHostDraw && (needsCulling || !lastFrameDirectHostDraw)) {
+            const auto& vertices = batchRenderer.getCpuVertices();
+            spriteRenderer->setVertices(vertices.data(), (u32)vertices.size());
+        }
+        lastFrameDirectHostDraw = directHostDraw;
+
         overdrawView.beginFrame();
     } else {
         gfx::GLint viewport[4] = {};
@@ -741,7 +782,11 @@ void Renderer::drawLayerNode(ObjectBatchNode* node) {
     PROFILER_PUSH("Renderer::drawLayerNode");
 
     auto& device = gfx::Device::get();
-    if (device.isHostMode()) {
+    if (device.isHostMode() && directHostDraw) {
+        auto timer = BProfiler::start("Bismuth drawing");
+        drawGroupDirect(groups[g]);
+        timer.end();
+    } else if (device.isHostMode()) {
         device.setHostViewRect(RendererViews::HostDraw);
         bgfx::setViewFrameBuffer(RendererViews::HostDraw, BGFX_INVALID_HANDLE);
         drawGroupLayers(groups[g], RendererViews::HostDraw, false);
@@ -795,7 +840,9 @@ void Renderer::updateDebugText() {
             text += fmt::format("Window: {}x{}\n", screenSize.width, screenSize.height);
             text += fmt::format("GPU time: {:.3f}ms{}\n", device.getLastGpuTimeMs(),
                                 device.isHostMode() ? " (only measured while this is shown)" : "");
-            if (device.isHostMode()) {
+            if (device.isHostMode() && directHostDraw) {
+                text += "Drawing: direct OpenGL (no bgfx)\n";
+            } else if (device.isHostMode()) {
                 const auto& flush = device.getLastHostFlushStats();
                 text += fmt::format("GL flushes: {}, save {:.3f}ms, bgfx {:.3f}ms, restore {:.3f}ms\n",
                                     flush.count, flush.saveMs, flush.bgfxMs, flush.restoreMs);

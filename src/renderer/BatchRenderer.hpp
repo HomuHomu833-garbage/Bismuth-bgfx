@@ -40,7 +40,15 @@ public:
     void updateFrame(const FrameBatchData& frame, const GameStateUniforms& gameState);
 
     /// Culls every sprite of the current batch. GPU path: compute dispatches on `computeView`.
-    void cull(bgfx::ViewId computeView);
+    /// CPU path: `uploadToBgfx` = false when the vertices are drawn without
+    /// bgfx (gfx::HostSpriteRenderer, see getCpuVertices / getCpuLayerRange).
+    void cull(bgfx::ViewId computeView, bool uploadToBgfx = true);
+
+    /// CPU path: the last cull's vertices (CpuVertex) and per layer ranges.
+    const std::vector<CpuVertex>& getCpuVertices() const { return cpuVertices; }
+    LayerVertexRange getCpuLayerRange(u32 layerIndex) const {
+        return layerIndex < cpuLayers.size() ? cpuLayers[layerIndex] : LayerVertexRange();
+    }
 
     /// Draws one layer of the current batch.
     /// `toSharedTarget`: drawing into a transparent shared render target (native

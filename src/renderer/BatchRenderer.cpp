@@ -228,7 +228,7 @@ void BatchRenderer::setGameStateUniform() {
     bgfx::setUniform(u_gameState, values, GAME_STATE_VEC4S);
 }
 
-void BatchRenderer::cull(bgfx::ViewId computeView) {
+void BatchRenderer::cull(bgfx::ViewId computeView, bool uploadToBgfx) {
     if (!initialized || !batch)
         return;
 
@@ -238,6 +238,8 @@ void BatchRenderer::cull(bgfx::ViewId computeView) {
 
         culler->run(data, *batch, *frame, gameState, cpuVertices, cpuLayers);
         lastVisibleVertices = (u32)cpuVertices.size();
+        if (!uploadToBgfx)
+            return;
 
         const u32 count = std::max<u32>((u32)cpuVertices.size(), 1);
         if (!bgfx::isValid(cpuVertexBuffer) || cpuVertexCapacity < count) {

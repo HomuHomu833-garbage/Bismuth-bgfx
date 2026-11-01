@@ -303,6 +303,8 @@ void Device::shutdown() {
     // Host mode textures are overrides of GD's (flagged shared, so bgfx never
     // deletes the GL texture); the others are bgfx's own.
     hostTextures.destroyAll();
+    spriteRenderer.destroy(hostLost);
+    spriteRendererFailed = false;
     generation++;
 
     if (hostLost) {
@@ -398,6 +400,18 @@ void Device::accumulateStats() {
     const auto* stats = bgfx::getStats();
     if (stats && stats->gpuTimerFreq > 0 && stats->gpuTimeEnd > stats->gpuTimeBegin)
         frameGpuTimeMs += double(stats->gpuTimeEnd - stats->gpuTimeBegin) * 1000.0 / double(stats->gpuTimerFreq);
+}
+
+HostSpriteRenderer* Device::getHostSpriteRenderer() {
+    if (!isHostMode() || cullingPath != CullingPath::Cpu || spriteRendererFailed)
+        return nullptr;
+    if (!spriteRenderer.isInitialized() && !spriteRenderer.init(host)) {
+        logf(LogLevel::Warn, "Bismuth: direct OpenGL sprite drawing unavailable, using bgfx");
+        spriteRenderer.destroy(false);
+        spriteRendererFailed = true;
+        return nullptr;
+    }
+    return &spriteRenderer;
 }
 
 void Device::setGpuTiming(bool enabled) {

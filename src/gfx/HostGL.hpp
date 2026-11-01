@@ -109,6 +109,8 @@ namespace gl {
     constexpr GLenum VERTEX_SHADER             = 0x8B31;
     constexpr GLenum FRAGMENT_SHADER           = 0x8B30;
     constexpr GLenum STATIC_DRAW               = 0x88E4;
+    constexpr GLenum STREAM_DRAW               = 0x88E0;
+    constexpr GLenum SRC_ALPHA                 = 0x0302;
     constexpr GLenum COLOR_BUFFER_BIT          = 0x4000;
     constexpr GLenum SYNC_GPU_COMMANDS_COMPLETE = 0x9117;
     constexpr GLenum SYNC_FLUSH_COMMANDS_BIT   = 0x00000001;
@@ -187,11 +189,14 @@ struct GLFunctions {
     F(void, glUniform1i, GLint, GLint) \
     F(void, glUniform1f, GLint, GLfloat) \
     F(void, glUniform2f, GLint, GLfloat, GLfloat) \
+    F(void, glUniformMatrix4fv, GLint, GLsizei, GLboolean, const GLfloat*) \
     F(void, glFlush) \
     F(void, glFinish)
 
 #define BISMUTH_GL_OPTIONAL_FUNCTIONS(F) \
     F(void, glBindVertexArray, GLuint) \
+    F(void, glGenVertexArrays, GLsizei, GLuint*) \
+    F(void, glDeleteVertexArrays, GLsizei, const GLuint*) \
     F(void, glBindSampler, GLuint, GLuint) \
     F(GLsync, glFenceSync, GLenum, GLbitfield) \
     F(GLenum, glClientWaitSync, GLsync, GLbitfield, GLuint64) \

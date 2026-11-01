@@ -12,6 +12,7 @@
 #include "SyntheticScene.hpp"
 #include <gfx/Device.hpp>
 #include <gfx/HostTextures.hpp>
+#include <gfx/HostSpriteRenderer.hpp>
 #include <renderer/BatchRenderer.hpp>
 #include <bgfx/platform.h>
 
@@ -172,7 +173,10 @@ struct Result {
     std::vector<u8> image;
 };
 
-static Result renderWith(HostWindow& host, const test::Scene& scene, BackendPreference backend, CullingPreference culling, const char* name) {
+enum class DirectGL { Off, WithVAO, WithoutVAO };
+
+static Result renderWith(HostWindow& host, const test::Scene& scene, BackendPreference backend, CullingPreference culling, const char* name,
+                         DirectGL direct = DirectGL::Off) {
     Result result;
     result.name = name;
 
@@ -204,6 +208,18 @@ static Result renderWith(HostWindow& host, const test::Scene& scene, BackendPref
     }
     batch.setSortedBatch(&scene.sorted);
 
+    // OpenGL mode + CPU culling without bgfx (what Bismuth does in that case).
+    HostSpriteRenderer spriteRenderer;
+    if (direct != DirectGL::Off) {
+        if (!device.isHostMode() || device.getCullingPath() != CullingPath::Cpu
+        ||  !spriteRenderer.init(device.getHost(), direct == DirectGL::WithVAO)) {
+            result.details += " [direct GL init failed]";
+            batch.shutdown();
+            device.shutdown();
+            return result;
+        }
+    }
+
     SharedTarget target;
     if (!device.isHostMode() && !device.getInterop()->createTarget(target, W, H)) {
         result.details += " [shared target failed]";
@@ -220,7 +236,21 @@ static Result renderWith(HostWindow& host, const test::Scene& scene, BackendPref
         auto before = std::make_unique<GLStateGuard>(info);
         batch.updateFrame(scene.frame, scene.gameState);
 
-        if (device.isHostMode()) {
+        if (direct != DirectGL::Off) {
+            batch.cull(0, false);
+            const auto& vertices = batch.getCpuVertices();
+            spriteRenderer.setVertices(vertices.data(), (u32)vertices.size());
+            for (u32 l = 0; l < scene.layerCount; l++) {
+                auto range = batch.getCpuLayerRange(l);
+                HostSpriteRenderer::Layer layer {
+                    .firstVertex = range.firstVertex,
+                    .vertexCount = range.vertexCount,
+                    .texture = host.sheet,
+                    .additive = layerBlend(l) == LayerBlend::Additive,
+                };
+                spriteRenderer.draw(scene.gameState.mvp, &layer, 1);
+            }
+        } else if (device.isHostMode()) {
             if (frame == 0) {
                 device.flushHost();
                 textures.finishImports();
@@ -272,6 +302,7 @@ static Result renderWith(HostWindow& host, const test::Scene& scene, BackendPref
 
     if (target.isValid() || bgfx::isValid(target.framebuffer))
         device.getInterop()->destroyTarget(target);
+    spriteRenderer.destroy(false);
     batch.shutdown();
     textures.destroyAll();
     device.shutdown();
@@ -310,6 +341,8 @@ int main() {
     std::vector<Result> results;
     results.push_back(renderWith(host, scene, BackendPreference::OpenGL, CullingPreference::Gpu, "OpenGL / GPU culling"));
     results.push_back(renderWith(host, scene, BackendPreference::OpenGL, CullingPreference::Cpu, "OpenGL / CPU culling"));
+    results.push_back(renderWith(host, scene, BackendPreference::OpenGL, CullingPreference::Cpu, "OpenGL direct / CPU", DirectGL::WithVAO));
+    results.push_back(renderWith(host, scene, BackendPreference::OpenGL, CullingPreference::Cpu, "OpenGL direct no VAO", DirectGL::WithoutVAO));
     results.push_back(renderWith(host, scene, BackendPreference::Native, CullingPreference::Gpu, "Vulkan / GPU culling"));
     results.push_back(renderWith(host, scene, BackendPreference::Native, CullingPreference::Cpu, "Vulkan / CPU culling"));
 

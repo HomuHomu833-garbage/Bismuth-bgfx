@@ -239,6 +239,13 @@ private:
     u32 sharedTargetHeight = 0;
     bool nativeFrameSubmitted = false;
 
+    // OpenGL mode with CPU culling: sprites are drawn with gfx::HostSpriteRenderer
+    // instead of bgfx (decided every frame, see draw()).
+    bool directHostDraw = false;
+    bool lastFrameDirectHostDraw = false;
+    std::vector<bismuth::gfx::HostSpriteRenderer::Layer> directLayers;
+    void drawGroupDirect(const CompositeGroup& group);
+
     bool differenceModeEnabled = false;
     DifferenceMode differenceMode;
     OverdrawView overdrawView;
