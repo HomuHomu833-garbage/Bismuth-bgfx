@@ -1,8 +1,8 @@
 diff --git a/include/bgfx/platform.h b/include/bgfx/platform.h
-index f7843b0..34388a5 100644
+index f7843b0..6358536 100644
 --- a/include/bgfx/platform.h
 +++ b/include/bgfx/platform.h
-@@ -131,6 +131,62 @@ namespace bgfx
+@@ -131,6 +131,66 @@ namespace bgfx
  		, uint64_t _flags = BGFX_TEXTURE_NONE|BGFX_SAMPLER_NONE
  		);
  
@@ -16,6 +16,10 @@ index f7843b0..34388a5 100644
 +	/// back buffer into framebuffer object `_fbo` and never presents/swaps.
 +	/// Call before `init` and whenever the host's framebuffer binding changes.
 +	void glSetHostFramebuffer(uint32_t _fbo);
++
++	/// OpenGL/OpenGL ES: enable/disable the per-frame GPU timer queries (on by
++	/// default). On some drivers (tilers) they split the host's render pass.
++	void glSetTimerQueries(bool _enabled);
 +
 +	/// Vulkan: native objects owned by bgfx (VkInstance, VkPhysicalDevice, ...).
 +	struct VkHostInterop
@@ -66,10 +70,10 @@ index f7843b0..34388a5 100644
  
  #endif // BGFX_PLATFORM_H_HEADER_GUARD
 diff --git a/src/bgfx.cpp b/src/bgfx.cpp
-index 323b262..3976637 100644
+index 323b262..9803ab7 100644
 --- a/src/bgfx.cpp
 +++ b/src/bgfx.cpp
-@@ -374,6 +374,79 @@ namespace bgfx
+@@ -374,6 +374,85 @@ namespace bgfx
  		return &g_internalData;
  	}
  
@@ -77,6 +81,7 @@ index 323b262..3976637 100644
 +	namespace gl
 +	{
 +		void setHostFramebuffer(uint32_t _fbo);
++		void setHostTimerQueries(bool _enabled);
 +		void clearHostIntegration();
 +	}
 +
@@ -100,6 +105,11 @@ index 323b262..3976637 100644
 +	void glSetHostFramebuffer(uint32_t _fbo)
 +	{
 +		gl::setHostFramebuffer(_fbo);
++	}
++
++	void glSetTimerQueries(bool _enabled)
++	{
++		gl::setHostTimerQueries(_enabled);
 +	}
 +
 +	void vkSetPreferredDeviceUuid(const uint8_t* _uuid)
@@ -149,7 +159,7 @@ index 323b262..3976637 100644
  	uintptr_t overrideInternal(TextureHandle _handle, uintptr_t _ptr)
  	{
  		BGFX_CHECK_RENDER_THREAD();
-@@ -2759,6 +2832,15 @@ namespace bgfx
+@@ -2759,6 +2838,15 @@ namespace bgfx
  		for (uint32_t ii = 0; ii < numScores; ++ii)
  		{
  			RendererType::Enum renderer = RendererType::Enum(scores[ii] & 0xff);
@@ -416,10 +426,10 @@ index ce8f353..2faa23c 100644
  		{
  			bool vsync = !!(_flags&BGFX_RESET_VSYNC);
 diff --git a/src/renderer_gl.cpp b/src/renderer_gl.cpp
-index 020dceb..39562c7 100644
+index 020dceb..bea7320 100644
 --- a/src/renderer_gl.cpp
 +++ b/src/renderer_gl.cpp
-@@ -13,6 +13,16 @@
+@@ -13,6 +13,17 @@
  
  namespace bgfx { namespace gl
  {
@@ -428,15 +438,16 @@ index 020dceb..39562c7 100644
 +	// whatever framebuffer object the host had bound and never presents/swaps.
 +	struct HostIntegration
 +	{
-+		bool   enabled = false;
-+		GLuint fbo     = 0;
++		bool   enabled      = false;
++		GLuint fbo          = 0;
++		bool   timerQueries = true;
 +	};
 +	static HostIntegration s_host;
 +
  	static char s_viewName[BGFX_CONFIG_MAX_VIEWS][BGFX_CONFIG_MAX_VIEW_NAME];
  
  	inline void setViewType(ViewId _view, const bx::StringView _str)
-@@ -3269,10 +3279,14 @@ namespace bgfx { namespace gl
+@@ -3269,10 +3280,14 @@ namespace bgfx { namespace gl
  
  				if (m_needPresent)
  				{
@@ -454,7 +465,7 @@ index 020dceb..39562c7 100644
  					m_needPresent = false;
  				}
  			}
-@@ -4147,7 +4161,7 @@ namespace bgfx { namespace gl
+@@ -4147,7 +4162,7 @@ namespace bgfx { namespace gl
  
  #if BX_PLATFORM_IOS
  					// iOS: need to figure out how to deal with FBO created by context.
@@ -463,7 +474,7 @@ index 020dceb..39562c7 100644
  #endif // BX_PLATFORM_IOS
  				}
  				else
-@@ -4825,6 +4839,23 @@ namespace bgfx { namespace gl
+@@ -4825,6 +4840,28 @@ namespace bgfx { namespace gl
  
  	RendererContextGL* s_renderGL;
  
@@ -479,6 +490,11 @@ index 020dceb..39562c7 100644
 +		}
 +	}
 +
++	void setHostTimerQueries(bool _enabled)
++	{
++		s_host.timerQueries = _enabled;
++	}
++
 +	void clearHostIntegration()
 +	{
 +		s_host = HostIntegration();
@@ -487,7 +503,17 @@ index 020dceb..39562c7 100644
  	RendererContextI* rendererCreate(const Init& _init)
  	{
  		s_renderGL = BX_NEW(g_allocator, RendererContextGL);
-@@ -7717,7 +7748,9 @@ namespace bgfx { namespace gl
+@@ -7494,7 +7531,8 @@ namespace bgfx { namespace gl
+ 		uint32_t frameQueryIdx = UINT32_MAX;
+ 
+ 		if (m_timerQuerySupport
+-		&&  !BX_ENABLED(BX_PLATFORM_OSX) )
++		&&  !BX_ENABLED(BX_PLATFORM_OSX)
++		&&  s_host.timerQueries)
+ 		{
+ 			frameQueryIdx = m_gpuTimer.begin(BGFX_CONFIG_MAX_VIEWS, _render->m_frameNum);
+ 		}
+@@ -7717,7 +7755,9 @@ namespace bgfx { namespace gl
  									{
  										const VertexBufferGL& buffer = m_vertexBuffers[bind.m_idx];
  										GL_CHECK(glBindBufferBase(GL_SHADER_STORAGE_BUFFER, ii, buffer.m_id) );
@@ -498,7 +524,7 @@ index 020dceb..39562c7 100644
  									}
  									break;
  								}
-@@ -8847,6 +8880,15 @@ namespace bgfx { namespace gl
+@@ -8847,6 +8887,20 @@ namespace bgfx { namespace gl
  	void rendererDestroy()
  	{
  	}
@@ -506,6 +532,11 @@ index 020dceb..39562c7 100644
 +	void setHostFramebuffer(uint32_t _fbo)
 +	{
 +		BX_UNUSED(_fbo);
++	}
++
++	void setHostTimerQueries(bool _enabled)
++	{
++		BX_UNUSED(_enabled);
 +	}
 +
 +	void clearHostIntegration()

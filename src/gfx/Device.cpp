@@ -400,6 +400,11 @@ void Device::accumulateStats() {
         frameGpuTimeMs += double(stats->gpuTimeEnd - stats->gpuTimeBegin) * 1000.0 / double(stats->gpuTimerFreq);
 }
 
+void Device::setGpuTiming(bool enabled) {
+    if (isHostMode())
+        bgfx::glSetTimerQueries(enabled);
+}
+
 void Device::endGameFrame() {
     lastGpuTimeMs = frameGpuTimeMs;
     frameGpuTimeMs = 0.0;

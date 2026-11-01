@@ -647,6 +647,10 @@ void Renderer::draw() {
         return;
     }
 
+    // GPU time is only shown in the F3 overlay; measuring it costs a lot on
+    // some drivers in OpenGL mode.
+    device.setGpuTiming(debugText && debugText->isVisible());
+
     fetchBlendingStates();
     prepareGameState();
 
@@ -789,7 +793,8 @@ void Renderer::updateDebugText() {
             text += fmt::format("Host GL: {}\n", host.version);
             text += fmt::format("{}\n", host.renderer);
             text += fmt::format("Window: {}x{}\n", screenSize.width, screenSize.height);
-            text += fmt::format("GPU time: {:.3f}ms\n", device.getLastGpuTimeMs());
+            text += fmt::format("GPU time: {:.3f}ms{}\n", device.getLastGpuTimeMs(),
+                                device.isHostMode() ? " (only measured while this is shown)" : "");
             if (device.isHostMode()) {
                 const auto& flush = device.getLastHostFlushStats();
                 text += fmt::format("GL flushes: {}, save {:.3f}ms, bgfx {:.3f}ms, restore {:.3f}ms\n",

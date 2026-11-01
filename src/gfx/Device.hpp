@@ -83,6 +83,10 @@ public:
     /// GPU time (ms) of the bgfx frames submitted during the last game frame.
     double getLastGpuTimeMs() const { return lastGpuTimeMs; }
 
+    /// Host mode: GPU timer queries on or off (on some drivers, e.g. tile based
+    /// GPUs, they split GD's render pass). The Vulkan / Metal backends keep them.
+    void setGpuTiming(bool enabled);
+
     /// CPU time of the last game frame's host mode flushes.
     struct HostFlushStats {
         u32 count = 0;
