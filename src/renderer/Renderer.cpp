@@ -366,7 +366,6 @@ void Renderer::prepareGameState() {
 }
 
 void Renderer::prepareColorChannels() {
-    auto timer = BProfiler::start("Generate color channel buffer");
     PROFILER_PUSH("Renderer::prepareColorChannels");
 
     // The color channels come first in the frame buffer, 4 packed RGBA8 per uvec4.
@@ -382,13 +381,12 @@ void Renderer::prepareColorChannels() {
         auto sprite = effectManager->m_colorActionSpriteVector[i];
         if (sprite == nullptr)
             continue;
-        setChannel(sprite->m_colorID, sprite->m_color.r, sprite->m_color.g, sprite->m_color.b, (u8)sprite->m_opacity);
+        setChannel(sprite->m_colorID, sprite->m_copyColor.r, sprite->m_copyColor.g, sprite->m_copyColor.b, (u8)sprite->m_opacity);
     }
 
     setChannel(COLOR_CHANNEL_BLACK, 0, 0, 0, 255);
 
     PROFILER_POP();
-    timer.end();
 }
 
 void Renderer::generateStaticRenderingBuffer(std::vector<GameObject*>& objects, bismuth::StaticBatchData& out) {
